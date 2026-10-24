@@ -5,11 +5,15 @@ FloatConvert — Radial Neon Floating Drag & Drop Image Format Converter
 A frameless, always-on-top circular desktop UI with glowing neon accents.
 Drag and drop one or more images directly onto any radial format button
 (ICO, GIF, WEBP, JPG, PNG, PDF) to convert them immediately in their
-original folder. Adjust compression quality using the bottom curved dial.
+original folder.
 
-Instant Hotkey & System Tray Mode:
-- Press Ctrl + Alt + C anytime to show or hide the circular UI instantly (0ms).
-- Clicking '✕' hides the widget to the System Tray so it stays ready in memory.
+Features:
+1. Direct Per-Button Drag & Drop (ICO, GIF, WEBP, JPG, PNG, PDF).
+2. File-Size Saved Readout (e.g., "-78% • 1.4 MB saved") in the center well.
+3. Clipboard Paste (Ctrl+V) & Auto-Copy converted files to clipboard.
+4. Multi-Image -> Single Merged PDF when dropping 2+ images onto PDF.
+5. Quick Resolution Scaling ("Original", "1080p", "50%") via center badge or menu.
+6. Instant 0ms Native Win32 Hotkey (Ctrl+Alt+C) & System Tray mode.
 
 Requirements:
     pip install PyQt6 Pillow
@@ -22,11 +26,22 @@ from __future__ import annotations
 
 import math
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
 from PIL import Image, ImageOps
-from PyQt6.QtCore import QPoint, QPointF, QRectF, Qt, QThread, QTimer, QUrl, pyqtSignal
+from PyQt6.QtCore import (
+    QMimeData,
+    QPoint,
+    QPointF,
+    QRectF,
+    Qt,
+    QThread,
+    QTimer,
+    QUrl,
+    pyqtSignal,
+)
 from PyQt6.QtGui import (
     QColor,
     QConicalGradient,
@@ -36,6 +51,8 @@ from PyQt6.QtGui import (
     QFont,
     QGuiApplication,
     QIcon,
+    QImage,
+    QKeyEvent,
     QLinearGradient,
     QMouseEvent,
     QPainter,
@@ -49,7 +66,6 @@ from PyQt6.QtWidgets import QApplication, QMenu, QSystemTrayIcon, QWidget
 
 SINGLE_INSTANCE_KEY = "FloatConvert_Radial_SingleInstance_Server"
 
-# Supported input extensions recognized when files or folders are dropped
 SUPPORTED_INPUT_EXTS = {
     ".jpg",
     ".jpeg",
@@ -66,7 +82,6 @@ SUPPORTED_INPUT_EXTS = {
     ".avif",
 }
 
-# Radial format buttons arranged clockwise around the ring:
 # (Label, Extension, Pillow Format, Angle in degrees [0=Right, 90=Bottom, 180=Left, 270=Top])
 RADIAL_FORMATS = [
     ("ICO", ".ico", "ICO", 140.0),
@@ -77,12 +92,13 @@ RADIAL_FORMATS = [
     ("PDF", ".pdf", "PDF", 330.0),
 ]
 
+SCALE_PRESETS = ["Original", "1080p", "50%"]
+
 
 class GlobalHotkeyThread(QThread):
     """
     Listens for Ctrl + Alt + C directly via the Windows Win32 kernel API
-    (RegisterHotKey) with 0% CPU usage and <1ms response time, bypassing
-    the slow 3-second Windows Explorer shortcut (.lnk) hotkey delay.
+    (RegisterHotKey) with 0% CPU usage and <1ms response time.
     """
 
     hotkey_pressed = pyqtSignal()
@@ -100,7 +116,6 @@ class GlobalHotkeyThread(QThread):
             MOD_NOREPEAT = 0x4000
             WM_HOTKEY = 0x0312
 
-            # Register Ctrl + Alt + C globally
             if not user32.RegisterHotKey(None, 1, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, ord("C")):
                 return
 
@@ -137,11 +152,101 @@ def create_neon_tray_icon() -> QIcon:
     return QIcon(pix)
 
 
+def format_bytes(num_bytes: int) -> str:
+    """Format byte count as KB or MB."""
+    if num_bytes >= 1024 * 1024:
+        return f"{num_bytes / (1024 * 1024):.1f} MB"
+    return f"{max(1, round(num_bytes / 1024))} KB"
+
+
+def format_size_delta(orig_bytes: int, new_bytes: int) -> str:
+    """Return a concise size-reduction readout such as '-78% • 1.4 MB saved'."""
+    if orig_bytes <= 0 or new_bytes <= 0:
+        return ""
+    saved = orig_bytes - new_bytes
+    if saved > 0:
+        pct = int(round((saved / orig_bytes) * 100))
+        return f"-{pct}% • {format_bytes(saved)} saved"
+    return f"Size: {format_bytes(new_bytes)}"
+
+
+def apply_resolution_preset(img: Image.Image, scale_preset: str) -> Image.Image:
+    """Resize image according to the active preset ('Original', '1080p', '50%')."""
+    if scale_preset == "1080p":
+        max_dim = max(img.width, img.height)
+        if max_dim > 1920:
+            scale = 1920.0 / max_dim
+            new_w = max(1, int(round(img.width * scale)))
+            new_h = max(1, int(round(img.height * scale)))
+            return img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+    elif scale_preset == "50%":
+        new_w = max(1, img.width // 2)
+        new_h = max(1, img.height // 2)
+        return img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+    return img
+
+
+def flatten_to_rgb(img: Image.Image) -> Image.Image:
+    """Flatten RGBA/palette transparency onto a white RGB background."""
+    if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
+        rgba = img.convert("RGBA")
+        background = Image.new("RGB", rgba.size, (255, 255, 255))
+        background.paste(rgba, mask=rgba.split()[3])
+        return background
+    if img.mode != "RGB":
+        return img.convert("RGB")
+    return img
+
+
+def _unique_output_path(parent_dir: Path, stem: str, target_ext: str) -> Path:
+    candidate = parent_dir / f"{stem}{target_ext}"
+    counter = 1
+    while candidate.exists():
+        candidate = parent_dir / f"{stem}_{counter}{target_ext}"
+        counter += 1
+    return candidate
+
+
+def convert_pil_image_to_path(
+    img: Image.Image,
+    output_path: Path,
+    pil_format: str,
+    quality: int = 85,
+    scale_preset: str = "Original",
+) -> Path:
+    """Save an in-memory PIL Image to `output_path` with scaling and format rules."""
+    img = ImageOps.exif_transpose(img)
+    img = apply_resolution_preset(img, scale_preset)
+
+    save_kwargs: dict = {}
+    if pil_format in {"JPEG", "BMP", "PDF"}:
+        img = flatten_to_rgb(img)
+    elif pil_format == "ICO":
+        img = img.convert("RGBA")
+        save_kwargs["sizes"] = [(min(img.width, 256), min(img.height, 256))]
+    elif pil_format in {"PNG", "WEBP", "TIFF"}:
+        if img.mode == "P":
+            img = img.convert("RGBA")
+
+    if pil_format in {"JPEG", "WEBP"}:
+        save_kwargs["quality"] = max(1, min(100, quality))
+        if pil_format == "JPEG":
+            save_kwargs["optimize"] = True
+        elif pil_format == "WEBP":
+            save_kwargs["method"] = 4
+    elif pil_format == "PNG":
+        save_kwargs["optimize"] = True
+
+    img.save(output_path, format=pil_format, **save_kwargs)
+    return output_path
+
+
 def convert_single_image(
     source_path: Path,
     target_ext: str,
     pil_format: str,
     quality: int = 85,
+    scale_preset: str = "Original",
     replace_original: bool = False,
 ) -> Path:
     """
@@ -150,54 +255,29 @@ def convert_single_image(
     """
     parent_dir = source_path.parent
     stem = source_path.stem
-
     candidate_out = parent_dir / f"{stem}{target_ext}"
 
     if candidate_out.resolve() == source_path.resolve():
         if replace_original:
             temp_out = parent_dir / f".{stem}_tmp_convert{target_ext}"
         else:
-            candidate_out = parent_dir / f"{stem}_converted{target_ext}"
+            candidate_out = _unique_output_path(parent_dir, f"{stem}_converted", target_ext)
             temp_out = None
     else:
         temp_out = None
         if not replace_original and candidate_out.exists():
-            counter = 1
-            while candidate_out.exists():
-                candidate_out = parent_dir / f"{stem}_{counter}{target_ext}"
-                counter += 1
+            candidate_out = _unique_output_path(parent_dir, stem, target_ext)
 
     write_target = temp_out if temp_out is not None else candidate_out
 
     with Image.open(source_path) as img:
-        img = ImageOps.exif_transpose(img)
-        save_kwargs: dict = {}
-
-        if pil_format in {"JPEG", "BMP", "PDF"}:
-            if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
-                rgba = img.convert("RGBA")
-                background = Image.new("RGB", rgba.size, (255, 255, 255))
-                background.paste(rgba, mask=rgba.split()[3])
-                img = background
-            elif img.mode != "RGB":
-                img = img.convert("RGB")
-        elif pil_format == "ICO":
-            img = img.convert("RGBA")
-            save_kwargs["sizes"] = [(min(img.width, 256), min(img.height, 256))]
-        elif pil_format in {"PNG", "WEBP", "TIFF"}:
-            if img.mode == "P":
-                img = img.convert("RGBA")
-
-        if pil_format in {"JPEG", "WEBP"}:
-            save_kwargs["quality"] = max(1, min(100, quality))
-            if pil_format == "JPEG":
-                save_kwargs["optimize"] = True
-            elif pil_format == "WEBP":
-                save_kwargs["method"] = 4
-        elif pil_format == "PNG":
-            save_kwargs["optimize"] = True
-
-        img.save(write_target, format=pil_format, **save_kwargs)
+        convert_pil_image_to_path(
+            img=img,
+            output_path=write_target,
+            pil_format=pil_format,
+            quality=quality,
+            scale_preset=scale_preset,
+        )
 
     if temp_out is not None:
         temp_out.replace(candidate_out)
@@ -210,11 +290,50 @@ def convert_single_image(
     return candidate_out
 
 
+def convert_images_to_merged_pdf(
+    source_paths: list[Path],
+    scale_preset: str = "Original",
+    replace_original: bool = False,
+) -> Path:
+    """Combine 2 or more images into a single multi-page PDF in the first image's folder."""
+    first = source_paths[0]
+    parent_dir = first.parent
+    out_path = _unique_output_path(parent_dir, f"{first.stem}_merged", ".pdf")
+
+    rgb_pages: list[Image.Image] = []
+    try:
+        for src in source_paths:
+            with Image.open(src) as img:
+                page = ImageOps.exif_transpose(img)
+                page = apply_resolution_preset(page, scale_preset)
+                page = flatten_to_rgb(page).copy()
+                rgb_pages.append(page)
+
+        rgb_pages[0].save(
+            out_path,
+            format="PDF",
+            save_all=True,
+            append_images=rgb_pages[1:],
+        )
+    finally:
+        for page in rgb_pages:
+            page.close()
+
+    if replace_original:
+        for src in source_paths:
+            if src.exists() and src.resolve() != out_path.resolve():
+                try:
+                    src.unlink()
+                except OSError:
+                    pass
+
+    return out_path
+
+
 class RadialImageConverter(QWidget):
     """
     Circular frameless floating desktop UI with 3D neon format tiles and
-    a curved bottom quality dial. Dropping files directly onto a format tile
-    immediately converts them to that format in the source folder.
+    a curved bottom quality dial.
     """
 
     WINDOW_SIZE = 460
@@ -232,7 +351,11 @@ class RadialImageConverter(QWidget):
     def __init__(self) -> None:
         super().__init__()
         self.quality: int = 85
+        self.scale_idx: int = 0  # 0="Original", 1="1080p", 2="50%"
+        self.default_paste_idx: int = 2  # Default Ctrl+V format: WEBP (index 2)
         self.replace_original: bool = False
+        self.auto_copy_clipboard: bool = True
+        self.merge_pdf_enabled: bool = True
         self.is_pinned: bool = True
 
         self.hovered_tile_idx: int | None = None
@@ -241,6 +364,7 @@ class RadialImageConverter(QWidget):
         self.is_dragging_files: bool = False
         self.is_adjusting_quality: bool = False
         self.hovered_close: bool = False
+        self.hovered_scale_badge: bool = False
 
         self._window_drag_offset: QPoint | None = None
         self._status_text: str = ""
@@ -258,6 +382,10 @@ class RadialImageConverter(QWidget):
         self._position_top_right()
         self._setup_tray_and_hotkey()
 
+    @property
+    def current_scale_preset(self) -> str:
+        return SCALE_PRESETS[self.scale_idx]
+
     def _configure_window(self) -> None:
         self.setWindowTitle("FloatConvert")
         self.setWindowFlags(
@@ -268,6 +396,7 @@ class RadialImageConverter(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAcceptDrops(True)
         self.setMouseTracking(True)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setFixedSize(self.WINDOW_SIZE, self.WINDOW_SIZE)
 
     def _position_top_right(self) -> None:
@@ -277,13 +406,14 @@ class RadialImageConverter(QWidget):
             self.move(geom.right() - self.width() - 24, geom.top() + 36)
 
     def _setup_tray_and_hotkey(self) -> None:
-        # System Tray Icon for instant restore
         self.tray_icon = QSystemTrayIcon(create_neon_tray_icon(), self)
         self.tray_icon.setToolTip("FloatConvert (Ctrl+Alt+C to Show/Hide)")
 
         tray_menu = QMenu()
         show_action = tray_menu.addAction("Show / Hide (Ctrl+Alt+C)")
         show_action.triggered.connect(self.toggle_visibility)
+        paste_action = tray_menu.addAction("Paste & Convert Clipboard (Ctrl+V)")
+        paste_action.triggered.connect(self.convert_from_clipboard)
         tray_menu.addSeparator()
         quit_action = tray_menu.addAction("Quit Completely")
         quit_action.triggered.connect(QApplication.instance().quit)
@@ -292,7 +422,6 @@ class RadialImageConverter(QWidget):
         self.tray_icon.activated.connect(self._on_tray_activated)
         self.tray_icon.show()
 
-        # Instant Native Hotkey Listener (Ctrl + Alt + C)
         self.hotkey_thread = GlobalHotkeyThread(self)
         self.hotkey_thread.hotkey_pressed.connect(self.toggle_visibility)
         self.hotkey_thread.start()
@@ -305,7 +434,6 @@ class RadialImageConverter(QWidget):
             self.toggle_visibility()
 
     def toggle_visibility(self) -> None:
-        """Instantly toggle the floating circular UI on or off (<1ms)."""
         if self.isVisible():
             self.hide()
         else:
@@ -316,8 +444,9 @@ class RadialImageConverter(QWidget):
         self.showNormal()
         self.raise_()
         self.activateWindow()
+        self.setFocus()
 
-    def _show_temporary_status(self, title: str, subtitle: str = "", duration_ms: int = 2400) -> None:
+    def _show_temporary_status(self, title: str, subtitle: str = "", duration_ms: int = 3200) -> None:
         self._status_text = title
         self._status_subtext = subtitle
         self._status_timer.start(duration_ms)
@@ -331,6 +460,23 @@ class RadialImageConverter(QWidget):
     def _clear_flash(self) -> None:
         self.active_flash_idx = None
         self.update()
+
+    def _cycle_scale_preset(self) -> None:
+        self.scale_idx = (self.scale_idx + 1) % len(SCALE_PRESETS)
+        descriptions = {
+            "Original": "100% Native Dimensions",
+            "1080p": "Max 1920px Longest Side",
+            "50%": "Half Width & Height",
+        }
+        preset = self.current_scale_preset
+        self._show_temporary_status(f"📐 SCALE: {preset.upper()}", descriptions[preset], 2200)
+
+    def _copy_files_to_clipboard(self, paths: list[Path]) -> None:
+        if not self.auto_copy_clipboard or not paths:
+            return
+        mime = QMimeData()
+        mime.setUrls([QUrl.fromLocalFile(str(p.resolve())) for p in paths])
+        QApplication.clipboard().setMimeData(mime)
 
     # ------------------------------------------------------------------
     # Geometry & Hit-Testing Helpers
@@ -349,6 +495,10 @@ class RadialImageConverter(QWidget):
 
     def _close_button_rect(self) -> QRectF:
         return QRectF(self.CENTER - 12, self.CENTER - self.INNER_WELL_RADIUS + 8, 24, 24)
+
+    def _scale_badge_rect(self) -> QRectF:
+        # Clickable resolution preset pill tucked at the bottom of the inner well
+        return QRectF(self.CENTER - 38, self.CENTER + self.INNER_WELL_RADIUS - 28, 76, 20)
 
     def _quality_angle_deg(self) -> float:
         t = max(0.0, min(1.0, self.quality / 100.0))
@@ -449,12 +599,11 @@ class RadialImageConverter(QWidget):
         painter.setPen(QPen(QColor(148, 163, 184, 75), 1.6))
         painter.drawEllipse(center_pt, self.OUTER_RADIUS, self.OUTER_RADIUS)
 
-        # Subtle inner rim highlight on outer disc edge
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.setPen(QPen(QColor(56, 189, 248, 45), 1.0))
         painter.drawEllipse(center_pt, self.OUTER_RADIUS - 2.5, self.OUTER_RADIUS - 2.5)
 
-        # 3. Recessed Central Torus Bezel & Clean Dark Center Well (No central text box)
+        # 3. Recessed Central Torus Bezel & Clean Dark Center Well
         bezel_glow = QRadialGradient(center_pt, self.INNER_BEZEL_OUTER + 10)
         bezel_glow.setColorAt(0.65, QColor(0, 0, 0, 0))
         bezel_glow.setColorAt(0.88, QColor(139, 92, 246, 85))
@@ -463,7 +612,6 @@ class RadialImageConverter(QWidget):
         painter.setBrush(bezel_glow)
         painter.drawEllipse(center_pt, self.INNER_BEZEL_OUTER + 10, self.INNER_BEZEL_OUTER + 10)
 
-        # 3D Torus Rim
         bezel_grad = QLinearGradient(
             self.CENTER,
             self.CENTER - self.INNER_BEZEL_OUTER,
@@ -477,7 +625,6 @@ class RadialImageConverter(QWidget):
         painter.setPen(QPen(QColor(168, 85, 247, 110), 1.5))
         painter.drawEllipse(center_pt, self.INNER_BEZEL_OUTER, self.INNER_BEZEL_OUTER)
 
-        # Deep Center Well (Clean dark brushed surface)
         well_grad = QRadialGradient(
             QPointF(self.CENTER - 18, self.CENTER - 18), self.INNER_WELL_RADIUS * 1.25
         )
@@ -491,11 +638,11 @@ class RadialImageConverter(QWidget):
         # 4. Draw Curved Quality Dial & Arc Track at Bottom
         self._draw_quality_arc_and_dial(painter, center_pt)
 
-        # 5. Draw Each Radial Format Button (Direct Drag-and-Drop Targets)
+        # 5. Draw Each Radial Format Button
         for idx in range(len(RADIAL_FORMATS)):
             self._draw_format_tile(painter, idx)
 
-        # 6. Draw Subtle Close Button & Transient Conversion Feedback (if any)
+        # 6. Draw Close Button, Quick Scale Preset Pill & Transient Status Readout
         self._draw_center_overlay(painter, center_pt)
 
     def _draw_format_tile(self, painter: QPainter, idx: int) -> None:
@@ -507,6 +654,7 @@ class RadialImageConverter(QWidget):
         is_hovered = self.hovered_tile_idx == idx
         is_flashed = self.active_flash_idx == idx
         is_highlighted = is_drag_target or is_hovered or is_flashed
+        is_paste_default = self.default_paste_idx == idx
 
         painter.save()
 
@@ -579,6 +727,13 @@ class RadialImageConverter(QWidget):
         painter.setPen(inner_pen)
         painter.drawRoundedRect(inner_rect, 10.0, 10.0)
 
+        # Small neon indicator dot on the active Ctrl+V clipboard target format
+        if is_paste_default:
+            dot_pt = QPointF(inner_rect.center().x(), inner_rect.bottom() - 5.5)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(56, 189, 248, 230))
+            painter.drawEllipse(dot_pt, 2.2, 2.2)
+
         # E. Crisp Format Label
         font = QFont("Segoe UI", 11)
         font.setBold(True)
@@ -606,7 +761,6 @@ class RadialImageConverter(QWidget):
         qt_start_angle = int(-self.ARC_START_DEG * 16)
         qt_total_span = int((self.ARC_START_DEG - self.ARC_END_DEG) * 16)
 
-        # 1. Recessed Dark Groove Track
         rim_pen = QPen(QColor(100, 116, 139, 75), 10.0, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
         painter.setPen(rim_pen)
         painter.drawArc(arc_rect, qt_start_angle, qt_total_span)
@@ -615,7 +769,6 @@ class RadialImageConverter(QWidget):
         painter.setPen(groove_pen)
         painter.drawArc(arc_rect, qt_start_angle, qt_total_span)
 
-        # 2. Glowing Neon Active Fill Arc
         q_angle = self._quality_angle_deg()
         qt_active_span = int((self.ARC_START_DEG - q_angle) * 16)
 
@@ -633,7 +786,6 @@ class RadialImageConverter(QWidget):
         painter.setPen(active_pen)
         painter.drawArc(arc_rect, qt_start_angle, qt_active_span)
 
-        # 3. Radial Tick Marks & Percentage Labels
         tick_font = QFont("Segoe UI", 7)
         tick_font.setBold(True)
         painter.setFont(tick_font)
@@ -668,7 +820,6 @@ class RadialImageConverter(QWidget):
                 painter.setPen(QColor(148, 163, 184, 175))
                 painter.drawText(lbl_rect, Qt.AlignmentFlag.AlignCenter, f"{pct_val}%")
 
-        # 4. Circular 3D Neon Glass Knob ("85% Quality")
         knob_pt = self._quality_knob_center()
         knob_radius = 27.0
 
@@ -716,7 +867,7 @@ class RadialImageConverter(QWidget):
     def _draw_center_overlay(self, painter: QPainter, center_pt: QPointF) -> None:
         painter.save()
 
-        # Subtle top button inside the center well (hides to background for instant reopen)
+        # 1. Subtle top close button inside the center well
         close_rect = self._close_button_rect()
         if self.hovered_close:
             painter.setBrush(QColor(239, 68, 68, 175))
@@ -729,7 +880,38 @@ class RadialImageConverter(QWidget):
         painter.setPen(QColor(255, 255, 255, 230 if self.hovered_close else 75))
         painter.drawText(close_rect, Qt.AlignmentFlag.AlignCenter, "✕")
 
-        # Transient status inside the center well only during an active drag or right after conversion
+        # 2. Quick Resolution Scaling Pill at the bottom of the inner well ("Original", "1080p", "50%")
+        scale_rect = self._scale_badge_rect()
+        is_scaled = self.scale_idx != 0
+        if self.hovered_scale_badge or is_scaled:
+            painter.setBrush(
+                QColor(109, 40, 217, 165) if is_scaled else QColor(51, 65, 85, 160)
+            )
+            painter.setPen(
+                QPen(
+                    QColor(192, 132, 252, 210)
+                    if is_scaled
+                    else QColor(148, 163, 184, 120),
+                    1.0,
+                )
+            )
+            painter.drawRoundedRect(scale_rect, 9.0, 9.0)
+
+        scale_font = QFont("Segoe UI", 7)
+        scale_font.setBold(True)
+        painter.setFont(scale_font)
+        painter.setPen(
+            QColor(233, 213, 255, 240)
+            if (self.hovered_scale_badge or is_scaled)
+            else QColor(148, 163, 184, 115)
+        )
+        painter.drawText(
+            scale_rect,
+            Qt.AlignmentFlag.AlignCenter,
+            f"📐 {self.current_scale_preset.upper()}",
+        )
+
+        # 3. Transient Status & File-Size Saved Readout inside the center well
         if self.is_dragging_files and self.drag_target_idx is not None:
             fmt_label = RADIAL_FORMATS[self.drag_target_idx][0]
             f1 = QFont("Segoe UI", 11)
@@ -737,34 +919,35 @@ class RadialImageConverter(QWidget):
             painter.setFont(f1)
             painter.setPen(QColor(233, 213, 255, 245))
             painter.drawText(
-                QRectF(self.CENTER - 70, self.CENTER - 16, 140, 20),
+                QRectF(self.CENTER - 72, self.CENTER - 20, 144, 20),
                 Qt.AlignmentFlag.AlignCenter,
                 f"DROP → {fmt_label}",
             )
             f2 = QFont("Segoe UI", 8)
             painter.setFont(f2)
-            painter.setPen(QColor(148, 163, 184, 210))
+            painter.setPen(QColor(148, 163, 184, 215))
             painter.drawText(
-                QRectF(self.CENTER - 70, self.CENTER + 4, 140, 16),
+                QRectF(self.CENTER - 72, self.CENTER + 0, 144, 16),
                 Qt.AlignmentFlag.AlignCenter,
-                f"Quality {self.quality}%",
+                f"{self.current_scale_preset} • Q:{self.quality}%",
             )
         elif self._status_text:
-            f1 = QFont("Segoe UI", 10)
+            f1 = QFont("Segoe UI", 9)
             f1.setBold(True)
             painter.setFont(f1)
-            painter.setPen(QColor(56, 189, 248, 245))
+            painter.setPen(QColor(56, 189, 248, 250))
             painter.drawText(
-                QRectF(self.CENTER - 72, self.CENTER - 16, 144, 20),
+                QRectF(self.CENTER - 74, self.CENTER - 20, 148, 18),
                 Qt.AlignmentFlag.AlignCenter,
                 self._status_text,
             )
             if self._status_subtext:
                 f2 = QFont("Segoe UI", 8)
+                f2.setBold(True)
                 painter.setFont(f2)
-                painter.setPen(QColor(203, 213, 225, 215))
+                painter.setPen(QColor(192, 132, 252, 245))
                 painter.drawText(
-                    QRectF(self.CENTER - 72, self.CENTER + 4, 144, 16),
+                    QRectF(self.CENTER - 76, self.CENTER - 1, 152, 18),
                     Qt.AlignmentFlag.AlignCenter,
                     self._status_subtext,
                 )
@@ -772,19 +955,125 @@ class RadialImageConverter(QWidget):
         painter.restore()
 
     # ------------------------------------------------------------------
-    # Mouse, Wheel, and Context Menu Interaction
+    # Keyboard (Ctrl + V Clipboard Paste), Mouse & Context Menu
     # ------------------------------------------------------------------
+    def keyPressEvent(self, event: QKeyEvent) -> None:
+        if event.matches(Qt.Key.Key_Paste) or (
+            event.modifiers() & Qt.KeyboardModifier.ControlModifier
+            and event.key() == Qt.Key.Key_V
+        ):
+            target_idx = (
+                self.hovered_tile_idx
+                if self.hovered_tile_idx is not None
+                else self.default_paste_idx
+            )
+            self.convert_from_clipboard(target_idx)
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def convert_from_clipboard(self, target_idx: int | None = None) -> None:
+        """Convert either copied image files or a raw screenshot from the Windows clipboard."""
+        if target_idx is None or not isinstance(target_idx, int):
+            target_idx = (
+                self.hovered_tile_idx
+                if self.hovered_tile_idx is not None
+                else self.default_paste_idx
+            )
+
+        clipboard = QApplication.clipboard()
+        mime = clipboard.mimeData()
+        if mime is None:
+            return
+
+        # Case 1: User copied image file(s) in File Explorer and pressed Ctrl+V
+        if mime.hasUrls():
+            files = self._collect_image_files(mime.urls())
+            if files:
+                self._run_conversion_batch(files, target_idx)
+                return
+
+        # Case 2: User took a screenshot (Win+Shift+S / PrtScn) and pressed Ctrl+V
+        qimg: QImage = clipboard.image()
+        if not qimg.isNull():
+            label, target_ext, pil_format, _ = RADIAL_FORMATS[target_idx]
+            self.active_flash_idx = target_idx
+            self._flash_timer.start(900)
+
+            try:
+                # Convert QImage to PIL Image via RGBA buffer
+                qimg_rgba = qimg.convertToFormat(QImage.Format.Format_RGBA8888)
+                width, height = qimg_rgba.width(), qimg_rgba.height()
+                ptr = qimg_rgba.bits()
+                ptr.setsize(height * qimg_rgba.bytesPerLine())
+                pil_img = Image.frombuffer(
+                    "RGBA",
+                    (width, height),
+                    bytes(ptr),
+                    "raw",
+                    "RGBA",
+                    qimg_rgba.bytesPerLine(),
+                    1,
+                )
+
+                # Save screenshot in Pictures/FloatConvert (or Desktop fallback)
+                save_dir = Path.home() / "Pictures" / "FloatConvert"
+                try:
+                    save_dir.mkdir(parents=True, exist_ok=True)
+                except OSError:
+                    save_dir = Path.home() / "Desktop"
+
+                stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                out_path = _unique_output_path(save_dir, f"clipboard_{stamp}", target_ext)
+
+                convert_pil_image_to_path(
+                    img=pil_img,
+                    output_path=out_path,
+                    pil_format=pil_format,
+                    quality=self.quality,
+                    scale_preset=self.current_scale_preset,
+                )
+
+                self._copy_files_to_clipboard([out_path])
+                new_size = out_path.stat().st_size if out_path.exists() else 0
+                self._show_temporary_status(
+                    f"📋 → {label} COPIED",
+                    f"{format_bytes(new_size)} • Ready to Ctrl+V",
+                    3200,
+                )
+            except Exception as exc:  # noqa: BLE001
+                self._show_temporary_status("❌ PASTE ERR", str(exc)[:22], 3000)
+            return
+
+        self._show_temporary_status("📋 CLIPBOARD EMPTY", "Copy an image first", 2200)
+
     def mousePressEvent(self, event: QMouseEvent) -> None:
         pos = event.position()
         if event.button() == Qt.MouseButton.LeftButton:
             if self._close_button_rect().contains(pos):
-                # Hide instead of quitting so Ctrl + Alt + C reopens in 0ms
                 self.hide()
+                return
+
+            if self._scale_badge_rect().contains(pos):
+                self._cycle_scale_preset()
                 return
 
             if self._hit_test_quality_arc(pos):
                 self.is_adjusting_quality = True
                 self._update_quality_from_pos(pos)
+                return
+
+            clicked_tile = self._hit_test_tile(pos, snap_nearest=False)
+            if clicked_tile is not None:
+                # Clicking a format tile sets it as the active Ctrl+V clipboard target
+                self.default_paste_idx = clicked_tile
+                fmt_label = RADIAL_FORMATS[clicked_tile][0]
+                self._show_temporary_status(
+                    f"📋 CTRL+V → {fmt_label}",
+                    "Press Ctrl+V to paste & convert",
+                    2000,
+                )
+                self.update()
                 return
 
             self._window_drag_offset = (
@@ -806,11 +1095,22 @@ class RadialImageConverter(QWidget):
 
         new_hover = self._hit_test_tile(pos, snap_nearest=False)
         new_close = self._close_button_rect().contains(pos)
+        new_scale = self._scale_badge_rect().contains(pos)
 
-        if new_hover != self.hovered_tile_idx or new_close != self.hovered_close:
+        if (
+            new_hover != self.hovered_tile_idx
+            or new_close != self.hovered_close
+            or new_scale != self.hovered_scale_badge
+        ):
             self.hovered_tile_idx = new_hover
             self.hovered_close = new_close
-            if new_hover is not None or new_close or self._hit_test_quality_arc(pos):
+            self.hovered_scale_badge = new_scale
+            if (
+                new_hover is not None
+                or new_close
+                or new_scale
+                or self._hit_test_quality_arc(pos)
+            ):
                 self.setCursor(Qt.CursorShape.PointingHandCursor)
             else:
                 self.setCursor(Qt.CursorShape.ArrowCursor)
@@ -823,6 +1123,7 @@ class RadialImageConverter(QWidget):
     def leaveEvent(self, event) -> None:
         self.hovered_tile_idx = None
         self.hovered_close = False
+        self.hovered_scale_badge = False
         self.update()
 
     def wheelEvent(self, event: QWheelEvent) -> None:
@@ -853,30 +1154,68 @@ class RadialImageConverter(QWidget):
             """
         )
 
-        pin_action = menu.addAction(
-            "✓ Always on Top" if self.is_pinned else "Always on Top"
+        paste_fmt = RADIAL_FORMATS[self.default_paste_idx][0]
+        paste_act = menu.addAction(f"📋 Paste & Convert to {paste_fmt} (Ctrl+V)")
+
+        scale_menu = menu.addMenu(f"📐 Resolution Scale ({self.current_scale_preset})")
+        scale_actions = {}
+        for idx, preset in enumerate(SCALE_PRESETS):
+            prefix = "✓ " if idx == self.scale_idx else "   "
+            act = scale_menu.addAction(f"{prefix}{preset}")
+            scale_actions[act] = idx
+
+        menu.addSeparator()
+        copy_act = menu.addAction(
+            "✓ Auto-Copy Converted File to Clipboard"
+            if self.auto_copy_clipboard
+            else "Auto-Copy Converted File to Clipboard"
+        )
+        merge_pdf_act = menu.addAction(
+            "✓ Merge Multiple Images into 1 PDF"
+            if self.merge_pdf_enabled
+            else "Merge Multiple Images into 1 PDF"
         )
         del_action = menu.addAction(
             "✓ Delete Original After Convert"
             if self.replace_original
             else "Delete Original After Convert"
         )
+        pin_action = menu.addAction(
+            "✓ Always on Top" if self.is_pinned else "Always on Top"
+        )
         menu.addSeparator()
         hide_action = menu.addAction("Hide Widget (Ctrl+Alt+C)")
         quit_action = menu.addAction("Quit Completely")
 
         chosen = menu.exec(event.globalPos())
-        if chosen == pin_action:
+        if chosen == paste_act:
+            self.convert_from_clipboard(self.default_paste_idx)
+        elif chosen in scale_actions:
+            self.scale_idx = scale_actions[chosen]
+            self._show_temporary_status(
+                f"📐 SCALE: {self.current_scale_preset.upper()}",
+                "Updated resize preset",
+                2000,
+            )
+        elif chosen == copy_act:
+            self.auto_copy_clipboard = not self.auto_copy_clipboard
+            state = "ON" if self.auto_copy_clipboard else "OFF"
+            self._show_temporary_status("📋 AUTO-COPY", f"Clipboard Copy: {state}", 1800)
+        elif chosen == merge_pdf_act:
+            self.merge_pdf_enabled = not self.merge_pdf_enabled
+            state = "Merged PDF" if self.merge_pdf_enabled else "Separate PDFs"
+            self._show_temporary_status("📄 PDF MODE", state, 1800)
+        elif chosen == del_action:
+            self.replace_original = not self.replace_original
+            mode_txt = "Replace Original: ON" if self.replace_original else "Keep Original: ON"
+            self._show_temporary_status("⚙️ MODE", mode_txt, 1800)
+        elif chosen == pin_action:
             self.is_pinned = not self.is_pinned
             flags = Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool
             if self.is_pinned:
                 flags |= Qt.WindowType.WindowStaysOnTopHint
             self.setWindowFlags(flags)
             self.show()
-        elif chosen == del_action:
-            self.replace_original = not self.replace_original
-            mode_txt = "Replace Original: ON" if self.replace_original else "Keep Original: ON"
-            self._show_temporary_status("⚙️ MODE", mode_txt, 1800)
         elif chosen == hide_action:
             self.hide()
         elif chosen == quit_action:
@@ -919,14 +1258,41 @@ class RadialImageConverter(QWidget):
             return
 
         event.acceptProposedAction()
-        label, target_ext, pil_format, _ = RADIAL_FORMATS[target_idx]
-
-        self.active_flash_idx = target_idx
-        self._flash_timer.start(900)
+        self.default_paste_idx = target_idx
 
         files = self._collect_image_files(event.mimeData().urls())
         if not files:
             self._show_temporary_status("⚠️ NO IMAGES", "Unsupported file type", 2400)
+            return
+
+        self._run_conversion_batch(files, target_idx)
+
+    def _run_conversion_batch(self, files: list[Path], target_idx: int) -> None:
+        label, target_ext, pil_format, _ = RADIAL_FORMATS[target_idx]
+        self.active_flash_idx = target_idx
+        self._flash_timer.start(900)
+
+        # Measure original file sizes before conversion (in case replace_original deletes them)
+        orig_bytes = sum(f.stat().st_size for f in files if f.exists())
+
+        # Special Case: Merge 2+ images dropped onto PDF into one multi-page PDF
+        if pil_format == "PDF" and len(files) >= 2 and self.merge_pdf_enabled:
+            try:
+                merged_out = convert_images_to_merged_pdf(
+                    source_paths=files,
+                    scale_preset=self.current_scale_preset,
+                    replace_original=self.replace_original,
+                )
+                new_bytes = merged_out.stat().st_size if merged_out.exists() else 0
+                self._copy_files_to_clipboard([merged_out])
+                delta_str = format_size_delta(orig_bytes, new_bytes)
+                self._show_temporary_status(
+                    f"✓ {len(files)} PAGES MERGED",
+                    delta_str or merged_out.name[:22],
+                    3400,
+                )
+            except Exception as exc:  # noqa: BLE001
+                self._show_temporary_status("❌ PDF FAILED", str(exc)[:22], 3000)
             return
 
         converted_paths: list[Path] = []
@@ -939,6 +1305,7 @@ class RadialImageConverter(QWidget):
                     target_ext=target_ext,
                     pil_format=pil_format,
                     quality=self.quality,
+                    scale_preset=self.current_scale_preset,
                     replace_original=self.replace_original,
                 )
                 converted_paths.append(out_path)
@@ -946,12 +1313,21 @@ class RadialImageConverter(QWidget):
                 errors.append(f"{file_path.name}: {exc}")
 
         if converted_paths and not errors:
+            new_bytes = sum(p.stat().st_size for p in converted_paths if p.exists())
+            delta_str = format_size_delta(orig_bytes, new_bytes)
+            self._copy_files_to_clipboard(converted_paths)
+
             if len(converted_paths) == 1:
-                out = converted_paths[0]
-                self._show_temporary_status(f"✓ {label} SAVED", out.name[:22], 2500)
+                self._show_temporary_status(
+                    f"✓ {label} SAVED",
+                    delta_str or converted_paths[0].name[:22],
+                    3400,
+                )
             else:
                 self._show_temporary_status(
-                    f"✓ {len(converted_paths)} → {label}", "Saved in folder", 2500
+                    f"✓ {len(converted_paths)} → {label}",
+                    delta_str or "Saved & copied",
+                    3400,
                 )
         elif converted_paths and errors:
             self._show_temporary_status(

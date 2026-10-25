@@ -1,22 +1,25 @@
 #!/usr/bin/env python3
 """
-FloatConvert — Radial Neon Floating Drag & Drop Image Format Converter
-======================================================================
-A frameless, always-on-top circular desktop UI with glowing neon accents.
-Drag and drop one or more images directly onto any radial format button
-(ICO, GIF, WEBP, JPG, PNG, PDF) to convert them immediately in their
-original folder.
+FloatConvert — Smart Drag-Activated Radial Neon Image Converter
+===============================================================
+A frameless, always-on-top circular desktop UI with glowing neon accents
+and zero-latency stealth activation.
 
-Features:
-1. Direct Per-Button Drag & Drop (ICO, GIF, WEBP, JPG, PNG, PDF).
-2. File-Size Saved Readout (e.g., "-78% • 1.4 MB saved") in the center well.
-3. Clipboard Paste (Ctrl+V) & Auto-Copy converted files to clipboard.
-4. Multi-Image -> Single Merged PDF when dropping 2+ images onto PDF.
-5. Quick Resolution Scaling ("Original", "1080p", "50%") via center badge or menu.
-6. Instant 0ms Native Win32 Hotkey (Ctrl+Alt+C) & System Tray mode.
+How It Works:
+- Press Ctrl + Alt + C: Activates (Arms) Smart Drag Mode silently in the
+  background without cluttering your screen.
+- Select & Move Any Image: As soon as you start dragging an image in File
+  Explorer or on your Desktop, the circular neon UI appears instantly (0ms).
+- Drop on Any Format Button (ICO, GIF, WEBP, JPG, PNG, PDF): Converts the
+  image in its original folder, flashes the file-size saved readout, and
+  automatically disappears—while staying armed for your next image drag.
+- Press Ctrl + Alt + D (or press Ctrl + Alt + C again): Disables Smart Drag
+  Mode so dragging files never triggers the UI until you re-enable it.
+- Press Ctrl + Alt + S (or click the System Tray icon): Manually pins the
+  wheel on screen to adjust the Quality Dial or Resolution Scale preset.
 
 Requirements:
-    pip install PyQt6 Pillow
+    pip install PyQt6 Pillow pillow-heif
 
 Usage:
     pythonw image_converter_app.py
@@ -26,11 +29,19 @@ from __future__ import annotations
 
 import math
 import sys
-from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
 from PIL import Image, ImageOps
+
+# Enable iPhone .HEIC / .HEIF support across all output formats (including PDF)
+try:
+    import pillow_heif
+
+    pillow_heif.register_heif_opener()
+except ImportError:
+    pass
+
 from PyQt6.QtCore import (
     QMimeData,
     QPoint,
@@ -45,14 +56,13 @@ from PyQt6.QtCore import (
 from PyQt6.QtGui import (
     QColor,
     QConicalGradient,
+    QCursor,
     QDragEnterEvent,
     QDragMoveEvent,
     QDropEvent,
     QFont,
     QGuiApplication,
     QIcon,
-    QImage,
-    QKeyEvent,
     QLinearGradient,
     QMouseEvent,
     QPainter,
@@ -66,7 +76,10 @@ from PyQt6.QtWidgets import QApplication, QMenu, QSystemTrayIcon, QWidget
 
 SINGLE_INSTANCE_KEY = "FloatConvert_Radial_SingleInstance_Server"
 
+# Supported input extensions (including iPhone .heic / .heif)
 SUPPORTED_INPUT_EXTS = {
+    ".heic",
+    ".heif",
     ".jpg",
     ".jpeg",
     ".png",
@@ -94,14 +107,27 @@ RADIAL_FORMATS = [
 
 SCALE_PRESETS = ["Original", "1080p", "50%"]
 
+# Windows Explorer & Desktop window class names where file drags originate
+EXPLORER_WINDOW_CLASSES = {
+    "CabinetWClass",
+    "ExploreWClass",
+    "Progman",
+    "WorkerW",
+    "#32770",
+}
+
 
 class GlobalHotkeyThread(QThread):
     """
-    Listens for Ctrl + Alt + C directly via the Windows Win32 kernel API
-    (RegisterHotKey) with 0% CPU usage and <1ms response time.
+    Listens for native Windows Win32 hotkeys with 0% CPU usage and <1ms latency:
+    - Hotkey 1 (Ctrl + Alt + C): Activate / Toggle Smart Drag Mode (silent arming)
+    - Hotkey 2 (Ctrl + Alt + D): Disable Smart Drag Mode immediately
+    - Hotkey 3 (Ctrl + Alt + S): Manually show/pin settings wheel
     """
 
-    hotkey_pressed = pyqtSignal()
+    toggle_armed_pressed = pyqtSignal()
+    disable_armed_pressed = pyqtSignal()
+    manual_show_pressed = pyqtSignal()
 
     def run(self) -> None:
         if sys.platform != "win32":
@@ -115,38 +141,57 @@ class GlobalHotkeyThread(QThread):
             MOD_CONTROL = 0x0002
             MOD_NOREPEAT = 0x4000
             WM_HOTKEY = 0x0312
+            mods = MOD_CONTROL | MOD_ALT | MOD_NOREPEAT
 
-            if not user32.RegisterHotKey(None, 1, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, ord("C")):
-                return
+            user32.RegisterHotKey(None, 1, mods, ord("C"))
+            user32.RegisterHotKey(None, 2, mods, ord("D"))
+            user32.RegisterHotKey(None, 3, mods, ord("S"))
 
             msg = wintypes.MSG()
             while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) != 0:
                 if msg.message == WM_HOTKEY:
-                    self.hotkey_pressed.emit()
+                    hk_id = msg.wParam
+                    if hk_id == 1:
+                        self.toggle_armed_pressed.emit()
+                    elif hk_id == 2:
+                        self.disable_armed_pressed.emit()
+                    elif hk_id == 3:
+                        self.manual_show_pressed.emit()
 
             user32.UnregisterHotKey(None, 1)
+            user32.UnregisterHotKey(None, 2)
+            user32.UnregisterHotKey(None, 3)
         except Exception:  # noqa: BLE001
             pass
 
 
-def create_neon_tray_icon() -> QIcon:
-    """Generate a crisp circular neon icon in memory for the Windows System Tray."""
+def create_neon_tray_icon(armed: bool = True) -> QIcon:
+    """Generate a crisp circular icon for the System Tray (Neon when Armed, Dim when Disabled)."""
     pix = QPixmap(64, 64)
     pix.fill(Qt.GlobalColor.transparent)
     painter = QPainter(pix)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
 
     grad = QRadialGradient(QPointF(32, 32), 28)
-    grad.setColorAt(0.0, QColor(192, 132, 252))
-    grad.setColorAt(0.55, QColor(109, 40, 217))
-    grad.setColorAt(1.0, QColor(15, 23, 42))
+    if armed:
+        grad.setColorAt(0.0, QColor(192, 132, 252))
+        grad.setColorAt(0.55, QColor(109, 40, 217))
+        grad.setColorAt(1.0, QColor(15, 23, 42))
+        ring_color = QColor(56, 189, 248)
+        inner_border = QColor(216, 180, 254)
+    else:
+        grad.setColorAt(0.0, QColor(100, 116, 139))
+        grad.setColorAt(0.55, QColor(51, 65, 85))
+        grad.setColorAt(1.0, QColor(15, 23, 42))
+        ring_color = QColor(71, 85, 105)
+        inner_border = QColor(148, 163, 184)
 
     painter.setBrush(grad)
-    painter.setPen(QPen(QColor(56, 189, 248), 4.0))
+    painter.setPen(QPen(ring_color, 4.0))
     painter.drawEllipse(QPointF(32, 32), 26, 26)
 
     painter.setBrush(QColor(15, 23, 42))
-    painter.setPen(QPen(QColor(216, 180, 254), 2.0))
+    painter.setPen(QPen(inner_border, 2.0))
     painter.drawEllipse(QPointF(32, 32), 12, 12)
     painter.end()
     return QIcon(pix)
@@ -187,7 +232,7 @@ def apply_resolution_preset(img: Image.Image, scale_preset: str) -> Image.Image:
 
 
 def flatten_to_rgb(img: Image.Image) -> Image.Image:
-    """Flatten RGBA/palette transparency onto a white RGB background."""
+    """Flatten RGBA/palette/HDR transparency onto a standard 8-bit white RGB background."""
     if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
         rgba = img.convert("RGBA")
         background = Image.new("RGB", rgba.size, (255, 255, 255))
@@ -214,7 +259,7 @@ def convert_pil_image_to_path(
     quality: int = 85,
     scale_preset: str = "Original",
 ) -> Path:
-    """Save an in-memory PIL Image to `output_path` with scaling and format rules."""
+    """Save an in-memory PIL Image (including decoded .HEIC) to `output_path`."""
     img = ImageOps.exif_transpose(img)
     img = apply_resolution_preset(img, scale_preset)
 
@@ -224,8 +269,8 @@ def convert_pil_image_to_path(
     elif pil_format == "ICO":
         img = img.convert("RGBA")
         save_kwargs["sizes"] = [(min(img.width, 256), min(img.height, 256))]
-    elif pil_format in {"PNG", "WEBP", "TIFF"}:
-        if img.mode == "P":
+    elif pil_format in {"PNG", "WEBP", "TIFF", "GIF"}:
+        if img.mode not in ("RGB", "RGBA"):
             img = img.convert("RGBA")
 
     if pil_format in {"JPEG", "WEBP"}:
@@ -250,7 +295,7 @@ def convert_single_image(
     replace_original: bool = False,
 ) -> Path:
     """
-    Convert `source_path` to `pil_format` in the exact same directory.
+    Convert `source_path` (including .HEIC) to `pil_format` in the exact same folder.
     Returns the output Path.
     """
     parent_dir = source_path.parent
@@ -295,7 +340,7 @@ def convert_images_to_merged_pdf(
     scale_preset: str = "Original",
     replace_original: bool = False,
 ) -> Path:
-    """Combine 2 or more images into a single multi-page PDF in the first image's folder."""
+    """Combine 2 or more images (including .HEIC) into a single multi-page PDF."""
     first = source_paths[0]
     parent_dir = first.parent
     out_path = _unique_output_path(parent_dir, f"{first.stem}_merged", ".pdf")
@@ -332,8 +377,9 @@ def convert_images_to_merged_pdf(
 
 class RadialImageConverter(QWidget):
     """
-    Circular frameless floating desktop UI with 3D neon format tiles and
-    a curved bottom quality dial.
+    Circular frameless floating desktop UI that stays pre-rendered in GPU memory
+    (0.0 opacity + click-through) when Armed, pops up in 0ms the instant you start
+    dragging an image in File Explorer/Desktop, and auto-hides right after conversion.
     """
 
     WINDOW_SIZE = 460
@@ -352,11 +398,19 @@ class RadialImageConverter(QWidget):
         super().__init__()
         self.quality: int = 85
         self.scale_idx: int = 0  # 0="Original", 1="1080p", 2="50%"
-        self.default_paste_idx: int = 2  # Default Ctrl+V format: WEBP (index 2)
         self.replace_original: bool = False
         self.auto_copy_clipboard: bool = True
         self.merge_pdf_enabled: bool = True
         self.is_pinned: bool = True
+
+        # Smart Drag-Sense State
+        self.is_armed: bool = True
+        self._wheel_shown: bool = False
+        self._manual_pin_visible: bool = False
+        self._conversion_just_finished: bool = False
+        self._mouse_was_down: bool = False
+        self._mouse_down_pos: QPoint = QPoint(0, 0)
+        self._drag_origin_is_explorer: bool = False
 
         self.hovered_tile_idx: int | None = None
         self.drag_target_idx: int | None = None
@@ -372,11 +426,20 @@ class RadialImageConverter(QWidget):
 
         self._status_timer = QTimer(self)
         self._status_timer.setSingleShot(True)
-        self._status_timer.timeout.connect(self._clear_status)
+        self._status_timer.timeout.connect(self._on_status_timeout)
 
         self._flash_timer = QTimer(self)
         self._flash_timer.setSingleShot(True)
         self._flash_timer.timeout.connect(self._clear_flash)
+
+        self._auto_hide_timer = QTimer(self)
+        self._auto_hide_timer.setSingleShot(True)
+        self._auto_hide_timer.timeout.connect(self._auto_hide_after_drag)
+
+        # 30ms lightweight poller that detects file drags in Explorer/Desktop
+        self._drag_watch_timer = QTimer(self)
+        self._drag_watch_timer.setInterval(30)
+        self._drag_watch_timer.timeout.connect(self._poll_mouse_drag_state)
 
         self._configure_window()
         self._position_top_right()
@@ -396,7 +459,6 @@ class RadialImageConverter(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAcceptDrops(True)
         self.setMouseTracking(True)
-        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setFixedSize(self.WINDOW_SIZE, self.WINDOW_SIZE)
 
     def _position_top_right(self) -> None:
@@ -405,56 +467,242 @@ class RadialImageConverter(QWidget):
             geom = screen.availableGeometry()
             self.move(geom.right() - self.width() - 24, geom.top() + 36)
 
-    def _setup_tray_and_hotkey(self) -> None:
-        self.tray_icon = QSystemTrayIcon(create_neon_tray_icon(), self)
-        self.tray_icon.setToolTip("FloatConvert (Ctrl+Alt+C to Show/Hide)")
+    def start_in_stealth_armed_mode(self) -> None:
+        """
+        Keep the window surface mapped in GPU memory at 0.0 opacity with Win32
+        click-through enabled so showing it on drag takes 0.0 milliseconds.
+        """
+        self.show()
+        self._set_wheel_visible(False)
+        self._drag_watch_timer.start()
 
-        tray_menu = QMenu()
-        show_action = tray_menu.addAction("Show / Hide (Ctrl+Alt+C)")
-        show_action.triggered.connect(self.toggle_visibility)
-        paste_action = tray_menu.addAction("Paste & Convert Clipboard (Ctrl+V)")
-        paste_action.triggered.connect(self.convert_from_clipboard)
-        tray_menu.addSeparator()
-        quit_action = tray_menu.addAction("Quit Completely")
+    def _set_win32_click_through(self, click_through: bool) -> None:
+        """Toggle Win32 WS_EX_TRANSPARENT so an invisible 0-opacity window never blocks clicks."""
+        if sys.platform != "win32":
+            return
+        try:
+            import ctypes
+
+            user32 = ctypes.windll.user32
+            hwnd = int(self.winId())
+            GWL_EXSTYLE = -20
+            WS_EX_LAYERED = 0x00080000
+            WS_EX_TRANSPARENT = 0x00000020
+            style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+            if click_through:
+                new_style = style | WS_EX_LAYERED | WS_EX_TRANSPARENT
+            else:
+                new_style = (style | WS_EX_LAYERED) & ~WS_EX_TRANSPARENT
+            user32.SetWindowLongW(hwnd, GWL_EXSTYLE, new_style)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _set_wheel_visible(self, visible: bool) -> None:
+        """Switch between 0ms invisible click-through stealth state and visible state."""
+        if visible == self._wheel_shown:
+            return
+        self._wheel_shown = visible
+        if visible:
+            self._set_win32_click_through(False)
+            self.setWindowOpacity(1.0)
+            self.raise_()
+            self.update()
+        else:
+            self.is_dragging_files = False
+            self.drag_target_idx = None
+            self.hovered_tile_idx = None
+            self.setWindowOpacity(0.0)
+            self._set_win32_click_through(True)
+
+    # ------------------------------------------------------------------
+    # Smart Drag-Sense Detection (Pops up wheel in 0ms when dragging files)
+    # ------------------------------------------------------------------
+    def _is_explorer_or_desktop_under_cursor(self, pt: QPoint) -> bool:
+        if sys.platform != "win32":
+            return True
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            user32 = ctypes.windll.user32
+            GA_ROOT = 2
+
+            wpt = wintypes.POINT(pt.x(), pt.y())
+            hwnd = user32.WindowFromPoint(wpt)
+            if not hwnd:
+                return False
+            root_hwnd = user32.GetAncestor(hwnd, GA_ROOT) or hwnd
+
+            buf = ctypes.create_unicode_buffer(64)
+            user32.GetClassNameW(root_hwnd, buf, 64)
+            if buf.value in EXPLORER_WINDOW_CLASSES:
+                return True
+
+            # Also check ForegroundWindow in case cursor is over a child shell view
+            fg_hwnd = user32.GetForegroundWindow()
+            if fg_hwnd:
+                user32.GetClassNameW(fg_hwnd, buf, 64)
+                if buf.value in EXPLORER_WINDOW_CLASSES:
+                    return True
+            return False
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _poll_mouse_drag_state(self) -> None:
+        if sys.platform != "win32" or not self.is_armed:
+            return
+        try:
+            import ctypes
+
+            user32 = ctypes.windll.user32
+            lbutton_down = (user32.GetAsyncKeyState(0x01) & 0x8000) != 0
+            cur_pos = QCursor.pos()
+
+            if lbutton_down and not self._mouse_was_down:
+                # Mouse button just pressed
+                self._mouse_was_down = True
+                self._mouse_down_pos = cur_pos
+                self._drag_origin_is_explorer = self._is_explorer_or_desktop_under_cursor(cur_pos)
+            elif lbutton_down and self._mouse_was_down:
+                # Mouse button held down — check if dragging from Explorer/Desktop
+                if (
+                    self._drag_origin_is_explorer
+                    and not self._wheel_shown
+                    and not self._conversion_just_finished
+                ):
+                    dx = cur_pos.x() - self._mouse_down_pos.x()
+                    dy = cur_pos.y() - self._mouse_down_pos.y()
+                    if math.hypot(dx, dy) >= 14.0:
+                        self._auto_hide_timer.stop()
+                        self._set_wheel_visible(True)
+            elif not lbutton_down and self._mouse_was_down:
+                # Mouse button released
+                self._mouse_was_down = False
+                self._drag_origin_is_explorer = False
+                if (
+                    self._wheel_shown
+                    and not self._manual_pin_visible
+                    and not self._conversion_just_finished
+                ):
+                    # User released drag outside the wheel without converting -> hide cleanly
+                    self._auto_hide_timer.start(350)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _auto_hide_after_drag(self) -> None:
+        if not self._manual_pin_visible and not self._conversion_just_finished and not self._mouse_was_down:
+            self._set_wheel_visible(False)
+
+    # ------------------------------------------------------------------
+    # Hotkeys & System Tray Controls
+    # ------------------------------------------------------------------
+    def _setup_tray_and_hotkey(self) -> None:
+        self.tray_icon = QSystemTrayIcon(create_neon_tray_icon(armed=True), self)
+        self.tray_icon.setToolTip(
+            "FloatConvert: ARMED (Drag any image to convert • Ctrl+Alt+D to Disable)"
+        )
+
+        self.tray_menu = QMenu()
+        self.arm_tray_action = self.tray_menu.addAction("✓ Smart Drag Mode: ARMED (Ctrl+Alt+C)")
+        self.arm_tray_action.triggered.connect(self.toggle_armed_mode)
+
+        self.disable_tray_action = self.tray_menu.addAction("Disable Smart Drag Mode (Ctrl+Alt+D)")
+        self.disable_tray_action.triggered.connect(self.disable_armed_mode)
+
+        self.tray_menu.addSeparator()
+        pin_show_action = self.tray_menu.addAction("Show / Pin Wheel for Settings (Ctrl+Alt+S)")
+        pin_show_action.triggered.connect(self.toggle_manual_pin_wheel)
+
+        self.tray_menu.addSeparator()
+        quit_action = self.tray_menu.addAction("Quit Completely")
         quit_action.triggered.connect(QApplication.instance().quit)
 
-        self.tray_icon.setContextMenu(tray_menu)
+        self.tray_icon.setContextMenu(self.tray_menu)
         self.tray_icon.activated.connect(self._on_tray_activated)
         self.tray_icon.show()
 
         self.hotkey_thread = GlobalHotkeyThread(self)
-        self.hotkey_thread.hotkey_pressed.connect(self.toggle_visibility)
+        self.hotkey_thread.toggle_armed_pressed.connect(self.activate_armed_mode_silently)
+        self.hotkey_thread.disable_armed_pressed.connect(self.disable_armed_mode)
+        self.hotkey_thread.manual_show_pressed.connect(self.toggle_manual_pin_wheel)
         self.hotkey_thread.start()
+
+    def _update_tray_status(self) -> None:
+        self.tray_icon.setIcon(create_neon_tray_icon(armed=self.is_armed))
+        if self.is_armed:
+            self.arm_tray_action.setText("✓ Smart Drag Mode: ARMED (Ctrl+Alt+C)")
+            self.tray_icon.setToolTip(
+                "FloatConvert: ARMED (Drag any image to convert • Ctrl+Alt+D to Disable)"
+            )
+        else:
+            self.arm_tray_action.setText("Smart Drag Mode: DISABLED (Press Ctrl+Alt+C to Arm)")
+            self.tray_icon.setToolTip("FloatConvert: DISABLED (Press Ctrl+Alt+C to Activate)")
+
+    def activate_armed_mode_silently(self) -> None:
+        """
+        Triggered by Ctrl + Alt + C:
+        Activates Smart Drag Mode in 0ms WITHOUT showing the circular UI on display.
+        The UI will automatically appear the moment the user selects and drags an image.
+        """
+        self.is_armed = True
+        self._manual_pin_visible = False
+        self._set_wheel_visible(False)
+        self._update_tray_status()
+
+    def disable_armed_mode(self) -> None:
+        """
+        Triggered by Ctrl + Alt + D:
+        Disables Smart Drag Mode and hides the UI so selecting/moving images never triggers it.
+        """
+        self.is_armed = False
+        self._manual_pin_visible = False
+        self._set_wheel_visible(False)
+        self._update_tray_status()
+
+    def toggle_armed_mode(self) -> None:
+        if self.is_armed:
+            self.disable_armed_mode()
+        else:
+            self.activate_armed_mode_silently()
+
+    def toggle_manual_pin_wheel(self) -> None:
+        """Triggered by Ctrl + Alt + S or clicking the System Tray icon to adjust Quality/Scale."""
+        if self._wheel_shown and self._manual_pin_visible:
+            self._manual_pin_visible = False
+            self._set_wheel_visible(False)
+        else:
+            self._manual_pin_visible = True
+            self._set_wheel_visible(True)
+            self.activateWindow()
 
     def _on_tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
         if reason in (
             QSystemTrayIcon.ActivationReason.Trigger,
             QSystemTrayIcon.ActivationReason.DoubleClick,
         ):
-            self.toggle_visibility()
+            self.toggle_manual_pin_wheel()
 
-    def toggle_visibility(self) -> None:
-        if self.isVisible():
-            self.hide()
-        else:
-            self.bring_to_front()
-
-    def bring_to_front(self) -> None:
-        self.show()
-        self.showNormal()
-        self.raise_()
-        self.activateWindow()
-        self.setFocus()
-
-    def _show_temporary_status(self, title: str, subtitle: str = "", duration_ms: int = 3200) -> None:
+    def _show_temporary_status(
+        self,
+        title: str,
+        subtitle: str = "",
+        duration_ms: int = 1100,
+        hide_wheel_on_finish: bool = False,
+    ) -> None:
         self._status_text = title
         self._status_subtext = subtitle
+        self._conversion_just_finished = hide_wheel_on_finish
         self._status_timer.start(duration_ms)
         self.update()
 
-    def _clear_status(self) -> None:
+    def _on_status_timeout(self) -> None:
         self._status_text = ""
         self._status_subtext = ""
+        if self._conversion_just_finished:
+            self._conversion_just_finished = False
+            if not self._manual_pin_visible:
+                self._set_wheel_visible(False)
+                return
         self.update()
 
     def _clear_flash(self) -> None:
@@ -469,7 +717,7 @@ class RadialImageConverter(QWidget):
             "50%": "Half Width & Height",
         }
         preset = self.current_scale_preset
-        self._show_temporary_status(f"📐 SCALE: {preset.upper()}", descriptions[preset], 2200)
+        self._show_temporary_status(f"📐 SCALE: {preset.upper()}", descriptions[preset], 1800)
 
     def _copy_files_to_clipboard(self, paths: list[Path]) -> None:
         if not self.auto_copy_clipboard or not paths:
@@ -497,7 +745,6 @@ class RadialImageConverter(QWidget):
         return QRectF(self.CENTER - 12, self.CENTER - self.INNER_WELL_RADIUS + 8, 24, 24)
 
     def _scale_badge_rect(self) -> QRectF:
-        # Clickable resolution preset pill tucked at the bottom of the inner well
         return QRectF(self.CENTER - 38, self.CENTER + self.INNER_WELL_RADIUS - 28, 76, 20)
 
     def _quality_angle_deg(self) -> float:
@@ -654,7 +901,6 @@ class RadialImageConverter(QWidget):
         is_hovered = self.hovered_tile_idx == idx
         is_flashed = self.active_flash_idx == idx
         is_highlighted = is_drag_target or is_hovered or is_flashed
-        is_paste_default = self.default_paste_idx == idx
 
         painter.save()
 
@@ -726,13 +972,6 @@ class RadialImageConverter(QWidget):
         painter.setBrush(inner_grad)
         painter.setPen(inner_pen)
         painter.drawRoundedRect(inner_rect, 10.0, 10.0)
-
-        # Small neon indicator dot on the active Ctrl+V clipboard target format
-        if is_paste_default:
-            dot_pt = QPointF(inner_rect.center().x(), inner_rect.bottom() - 5.5)
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor(56, 189, 248, 230))
-            painter.drawEllipse(dot_pt, 2.2, 2.2)
 
         # E. Crisp Format Label
         font = QFont("Segoe UI", 11)
@@ -955,103 +1194,14 @@ class RadialImageConverter(QWidget):
         painter.restore()
 
     # ------------------------------------------------------------------
-    # Keyboard (Ctrl + V Clipboard Paste), Mouse & Context Menu
+    # Mouse & Context Menu Interaction
     # ------------------------------------------------------------------
-    def keyPressEvent(self, event: QKeyEvent) -> None:
-        if event.matches(Qt.Key.Key_Paste) or (
-            event.modifiers() & Qt.KeyboardModifier.ControlModifier
-            and event.key() == Qt.Key.Key_V
-        ):
-            target_idx = (
-                self.hovered_tile_idx
-                if self.hovered_tile_idx is not None
-                else self.default_paste_idx
-            )
-            self.convert_from_clipboard(target_idx)
-            event.accept()
-            return
-        super().keyPressEvent(event)
-
-    def convert_from_clipboard(self, target_idx: int | None = None) -> None:
-        """Convert either copied image files or a raw screenshot from the Windows clipboard."""
-        if target_idx is None or not isinstance(target_idx, int):
-            target_idx = (
-                self.hovered_tile_idx
-                if self.hovered_tile_idx is not None
-                else self.default_paste_idx
-            )
-
-        clipboard = QApplication.clipboard()
-        mime = clipboard.mimeData()
-        if mime is None:
-            return
-
-        # Case 1: User copied image file(s) in File Explorer and pressed Ctrl+V
-        if mime.hasUrls():
-            files = self._collect_image_files(mime.urls())
-            if files:
-                self._run_conversion_batch(files, target_idx)
-                return
-
-        # Case 2: User took a screenshot (Win+Shift+S / PrtScn) and pressed Ctrl+V
-        qimg: QImage = clipboard.image()
-        if not qimg.isNull():
-            label, target_ext, pil_format, _ = RADIAL_FORMATS[target_idx]
-            self.active_flash_idx = target_idx
-            self._flash_timer.start(900)
-
-            try:
-                # Convert QImage to PIL Image via RGBA buffer
-                qimg_rgba = qimg.convertToFormat(QImage.Format.Format_RGBA8888)
-                width, height = qimg_rgba.width(), qimg_rgba.height()
-                ptr = qimg_rgba.bits()
-                ptr.setsize(height * qimg_rgba.bytesPerLine())
-                pil_img = Image.frombuffer(
-                    "RGBA",
-                    (width, height),
-                    bytes(ptr),
-                    "raw",
-                    "RGBA",
-                    qimg_rgba.bytesPerLine(),
-                    1,
-                )
-
-                # Save screenshot in Pictures/FloatConvert (or Desktop fallback)
-                save_dir = Path.home() / "Pictures" / "FloatConvert"
-                try:
-                    save_dir.mkdir(parents=True, exist_ok=True)
-                except OSError:
-                    save_dir = Path.home() / "Desktop"
-
-                stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                out_path = _unique_output_path(save_dir, f"clipboard_{stamp}", target_ext)
-
-                convert_pil_image_to_path(
-                    img=pil_img,
-                    output_path=out_path,
-                    pil_format=pil_format,
-                    quality=self.quality,
-                    scale_preset=self.current_scale_preset,
-                )
-
-                self._copy_files_to_clipboard([out_path])
-                new_size = out_path.stat().st_size if out_path.exists() else 0
-                self._show_temporary_status(
-                    f"📋 → {label} COPIED",
-                    f"{format_bytes(new_size)} • Ready to Ctrl+V",
-                    3200,
-                )
-            except Exception as exc:  # noqa: BLE001
-                self._show_temporary_status("❌ PASTE ERR", str(exc)[:22], 3000)
-            return
-
-        self._show_temporary_status("📋 CLIPBOARD EMPTY", "Copy an image first", 2200)
-
     def mousePressEvent(self, event: QMouseEvent) -> None:
         pos = event.position()
         if event.button() == Qt.MouseButton.LeftButton:
             if self._close_button_rect().contains(pos):
-                self.hide()
+                self._manual_pin_visible = False
+                self._set_wheel_visible(False)
                 return
 
             if self._scale_badge_rect().contains(pos):
@@ -1061,19 +1211,6 @@ class RadialImageConverter(QWidget):
             if self._hit_test_quality_arc(pos):
                 self.is_adjusting_quality = True
                 self._update_quality_from_pos(pos)
-                return
-
-            clicked_tile = self._hit_test_tile(pos, snap_nearest=False)
-            if clicked_tile is not None:
-                # Clicking a format tile sets it as the active Ctrl+V clipboard target
-                self.default_paste_idx = clicked_tile
-                fmt_label = RADIAL_FORMATS[clicked_tile][0]
-                self._show_temporary_status(
-                    f"📋 CTRL+V → {fmt_label}",
-                    "Press Ctrl+V to paste & convert",
-                    2000,
-                )
-                self.update()
                 return
 
             self._window_drag_offset = (
@@ -1154,9 +1291,6 @@ class RadialImageConverter(QWidget):
             """
         )
 
-        paste_fmt = RADIAL_FORMATS[self.default_paste_idx][0]
-        paste_act = menu.addAction(f"📋 Paste & Convert to {paste_fmt} (Ctrl+V)")
-
         scale_menu = menu.addMenu(f"📐 Resolution Scale ({self.current_scale_preset})")
         scale_actions = {}
         for idx, preset in enumerate(SCALE_PRESETS):
@@ -1180,52 +1314,45 @@ class RadialImageConverter(QWidget):
             if self.replace_original
             else "Delete Original After Convert"
         )
-        pin_action = menu.addAction(
-            "✓ Always on Top" if self.is_pinned else "Always on Top"
-        )
         menu.addSeparator()
-        hide_action = menu.addAction("Hide Widget (Ctrl+Alt+C)")
+        hide_action = menu.addAction("Hide Back to Stealth Armed Mode")
+        disable_action = menu.addAction("Disable Smart Drag Mode (Ctrl+Alt+D)")
         quit_action = menu.addAction("Quit Completely")
 
         chosen = menu.exec(event.globalPos())
-        if chosen == paste_act:
-            self.convert_from_clipboard(self.default_paste_idx)
-        elif chosen in scale_actions:
+        if chosen in scale_actions:
             self.scale_idx = scale_actions[chosen]
             self._show_temporary_status(
                 f"📐 SCALE: {self.current_scale_preset.upper()}",
                 "Updated resize preset",
-                2000,
+                1600,
             )
         elif chosen == copy_act:
             self.auto_copy_clipboard = not self.auto_copy_clipboard
             state = "ON" if self.auto_copy_clipboard else "OFF"
-            self._show_temporary_status("📋 AUTO-COPY", f"Clipboard Copy: {state}", 1800)
+            self._show_temporary_status("📋 AUTO-COPY", f"Clipboard Copy: {state}", 1600)
         elif chosen == merge_pdf_act:
             self.merge_pdf_enabled = not self.merge_pdf_enabled
             state = "Merged PDF" if self.merge_pdf_enabled else "Separate PDFs"
-            self._show_temporary_status("📄 PDF MODE", state, 1800)
+            self._show_temporary_status("📄 PDF MODE", state, 1600)
         elif chosen == del_action:
             self.replace_original = not self.replace_original
             mode_txt = "Replace Original: ON" if self.replace_original else "Keep Original: ON"
-            self._show_temporary_status("⚙️ MODE", mode_txt, 1800)
-        elif chosen == pin_action:
-            self.is_pinned = not self.is_pinned
-            flags = Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool
-            if self.is_pinned:
-                flags |= Qt.WindowType.WindowStaysOnTopHint
-            self.setWindowFlags(flags)
-            self.show()
+            self._show_temporary_status("⚙️ MODE", mode_txt, 1600)
         elif chosen == hide_action:
-            self.hide()
+            self._manual_pin_visible = False
+            self._set_wheel_visible(False)
+        elif chosen == disable_action:
+            self.disable_armed_mode()
         elif chosen == quit_action:
             QApplication.instance().quit()
 
     # ------------------------------------------------------------------
-    # Direct Per-Button Drag & Drop Conversion
+    # Direct Per-Button Drag & Drop Conversion (Auto-Hides After Use)
     # ------------------------------------------------------------------
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
         if event.mimeData().hasUrls():
+            self._auto_hide_timer.stop()
             event.acceptProposedAction()
             self.is_dragging_files = True
             self.drag_target_idx = self._hit_test_tile(event.position(), snap_nearest=True)
@@ -1235,6 +1362,7 @@ class RadialImageConverter(QWidget):
 
     def dragMoveEvent(self, event: QDragMoveEvent) -> None:
         if event.mimeData().hasUrls():
+            self._auto_hide_timer.stop()
             target_idx = self._hit_test_tile(event.position(), snap_nearest=True)
             if target_idx != self.drag_target_idx:
                 self.drag_target_idx = target_idx
@@ -1258,11 +1386,14 @@ class RadialImageConverter(QWidget):
             return
 
         event.acceptProposedAction()
-        self.default_paste_idx = target_idx
-
         files = self._collect_image_files(event.mimeData().urls())
         if not files:
-            self._show_temporary_status("⚠️ NO IMAGES", "Unsupported file type", 2400)
+            self._show_temporary_status(
+                "⚠️ NO IMAGES",
+                "Unsupported file type",
+                1200,
+                hide_wheel_on_finish=True,
+            )
             return
 
         self._run_conversion_batch(files, target_idx)
@@ -1270,12 +1401,12 @@ class RadialImageConverter(QWidget):
     def _run_conversion_batch(self, files: list[Path], target_idx: int) -> None:
         label, target_ext, pil_format, _ = RADIAL_FORMATS[target_idx]
         self.active_flash_idx = target_idx
-        self._flash_timer.start(900)
+        self._flash_timer.start(800)
 
-        # Measure original file sizes before conversion (in case replace_original deletes them)
+        # Measure original file sizes before conversion
         orig_bytes = sum(f.stat().st_size for f in files if f.exists())
 
-        # Special Case: Merge 2+ images dropped onto PDF into one multi-page PDF
+        # Special Case: Merge 2+ images (including .HEIC) dropped onto PDF into one multi-page PDF
         if pil_format == "PDF" and len(files) >= 2 and self.merge_pdf_enabled:
             try:
                 merged_out = convert_images_to_merged_pdf(
@@ -1289,10 +1420,16 @@ class RadialImageConverter(QWidget):
                 self._show_temporary_status(
                     f"✓ {len(files)} PAGES MERGED",
                     delta_str or merged_out.name[:22],
-                    3400,
+                    900,
+                    hide_wheel_on_finish=True,
                 )
             except Exception as exc:  # noqa: BLE001
-                self._show_temporary_status("❌ PDF FAILED", str(exc)[:22], 3000)
+                self._show_temporary_status(
+                    "❌ PDF FAILED",
+                    str(exc)[:22],
+                    1500,
+                    hide_wheel_on_finish=True,
+                )
             return
 
         converted_paths: list[Path] = []
@@ -1321,20 +1458,30 @@ class RadialImageConverter(QWidget):
                 self._show_temporary_status(
                     f"✓ {label} SAVED",
                     delta_str or converted_paths[0].name[:22],
-                    3400,
+                    900,
+                    hide_wheel_on_finish=True,
                 )
             else:
                 self._show_temporary_status(
                     f"✓ {len(converted_paths)} → {label}",
                     delta_str or "Saved & copied",
-                    3400,
+                    900,
+                    hide_wheel_on_finish=True,
                 )
         elif converted_paths and errors:
             self._show_temporary_status(
-                f"⚠️ {len(converted_paths)} OK / {len(errors)} ERR", errors[0][:20], 3000
+                f"⚠️ {len(converted_paths)} OK / {len(errors)} ERR",
+                errors[0][:20],
+                1500,
+                hide_wheel_on_finish=True,
             )
         else:
-            self._show_temporary_status("❌ FAILED", errors[0][:22], 3000)
+            self._show_temporary_status(
+                "❌ FAILED",
+                errors[0][:22],
+                1500,
+                hide_wheel_on_finish=True,
+            )
 
     def _collect_image_files(self, urls: Iterable[QUrl]) -> list[Path]:
         collected: list[Path] = []
@@ -1360,7 +1507,7 @@ def main() -> None:
     socket = QLocalSocket()
     socket.connectToServer(SINGLE_INSTANCE_KEY)
     if socket.waitForConnected(200):
-        socket.write(b"SHOW")
+        socket.write(b"ARM")
         socket.waitForBytesWritten(200)
         socket.disconnectFromServer()
         sys.exit(0)
@@ -1370,8 +1517,8 @@ def main() -> None:
     server.listen(SINGLE_INSTANCE_KEY)
 
     converter = RadialImageConverter()
-    server.newConnection.connect(converter.bring_to_front)
-    converter.show()
+    server.newConnection.connect(converter.activate_armed_mode_silently)
+    converter.start_in_stealth_armed_mode()
     sys.exit(app.exec())
 
 

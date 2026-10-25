@@ -7,16 +7,15 @@ and zero-latency stealth activation.
 
 How It Works:
 - Press Ctrl + Alt + C: Activates (Arms) Smart Drag Mode silently in the
-  background without cluttering your screen.
-- Select & Move Any Image: As soon as you start dragging an image in File
-  Explorer or on your Desktop, the circular neon UI appears instantly (0ms).
+  background.
+- Press Ctrl + Alt + D: Disables Smart Drag Mode completely so dragging
+  never triggers the UI until you press Ctrl + Alt + C again.
+- Drag Any Image: Hovering or clicking to select an image will NOT trigger
+  the UI. When you hold and drag an image in File Explorer or Desktop, the
+  circular neon UI appears in the CENTER of your screen (0ms).
 - Drop on Any Format Button (ICO, GIF, WEBP, JPG, PNG, PDF): Converts the
   image in its original folder, flashes the file-size saved readout, and
   automatically disappears—while staying armed for your next image drag.
-- Press Ctrl + Alt + D (or press Ctrl + Alt + C again): Disables Smart Drag
-  Mode so dragging files never triggers the UI until you re-enable it.
-- Press Ctrl + Alt + S (or click the System Tray icon): Manually pins the
-  wheel on screen to adjust the Quality Dial or Resolution Scale preset.
 
 Requirements:
     pip install PyQt6 Pillow pillow-heif
@@ -29,6 +28,7 @@ from __future__ import annotations
 
 import math
 import sys
+import time
 from pathlib import Path
 from typing import Iterable
 
@@ -120,14 +120,12 @@ EXPLORER_WINDOW_CLASSES = {
 class GlobalHotkeyThread(QThread):
     """
     Listens for native Windows Win32 hotkeys with 0% CPU usage and <1ms latency:
-    - Hotkey 1 (Ctrl + Alt + C): Activate / Toggle Smart Drag Mode (silent arming)
-    - Hotkey 2 (Ctrl + Alt + D): Disable Smart Drag Mode immediately
-    - Hotkey 3 (Ctrl + Alt + S): Manually show/pin settings wheel
+    - Hotkey 1 (Ctrl + Alt + C): Activate (Arm) Smart Drag Mode
+    - Hotkey 2 (Ctrl + Alt + D): Disable Smart Drag Mode
     """
 
-    toggle_armed_pressed = pyqtSignal()
-    disable_armed_pressed = pyqtSignal()
-    manual_show_pressed = pyqtSignal()
+    activate_pressed = pyqtSignal()
+    disable_pressed = pyqtSignal()
 
     def run(self) -> None:
         if sys.platform != "win32":
@@ -145,22 +143,18 @@ class GlobalHotkeyThread(QThread):
 
             user32.RegisterHotKey(None, 1, mods, ord("C"))
             user32.RegisterHotKey(None, 2, mods, ord("D"))
-            user32.RegisterHotKey(None, 3, mods, ord("S"))
 
             msg = wintypes.MSG()
             while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) != 0:
                 if msg.message == WM_HOTKEY:
                     hk_id = msg.wParam
                     if hk_id == 1:
-                        self.toggle_armed_pressed.emit()
+                        self.activate_pressed.emit()
                     elif hk_id == 2:
-                        self.disable_armed_pressed.emit()
-                    elif hk_id == 3:
-                        self.manual_show_pressed.emit()
+                        self.disable_pressed.emit()
 
             user32.UnregisterHotKey(None, 1)
             user32.UnregisterHotKey(None, 2)
-            user32.UnregisterHotKey(None, 3)
         except Exception:  # noqa: BLE001
             pass
 
@@ -378,8 +372,9 @@ def convert_images_to_merged_pdf(
 class RadialImageConverter(QWidget):
     """
     Circular frameless floating desktop UI that stays pre-rendered in GPU memory
-    (0.0 opacity + click-through) when Armed, pops up in 0ms the instant you start
-    dragging an image in File Explorer/Desktop, and auto-hides right after conversion.
+    (0.0 opacity + click-through) when Armed, pops up in the CENTER of the screen
+    in 0ms when you hold and drag an image in File Explorer/Desktop, and auto-hides
+    right after conversion.
     """
 
     WINDOW_SIZE = 460
@@ -393,6 +388,10 @@ class RadialImageConverter(QWidget):
     # Bottom quality arc angles (screen degrees: 0=Right, 90=Bottom, 180=Left)
     ARC_START_DEG = 114.0  # 0% / min end (bottom-left)
     ARC_END_DEG = 18.0     # 100% / max end (bottom-right)
+
+    # Drag threshold so normal single-clicks / selecting an image never triggers the UI
+    DRAG_MIN_DISTANCE_PX = 45.0
+    DRAG_MIN_HOLD_SECONDS = 0.18
 
     def __init__(self) -> None:
         super().__init__()
@@ -410,6 +409,7 @@ class RadialImageConverter(QWidget):
         self._conversion_just_finished: bool = False
         self._mouse_was_down: bool = False
         self._mouse_down_pos: QPoint = QPoint(0, 0)
+        self._mouse_down_time: float = 0.0
         self._drag_origin_is_explorer: bool = False
 
         self.hovered_tile_idx: int | None = None
@@ -442,7 +442,7 @@ class RadialImageConverter(QWidget):
         self._drag_watch_timer.timeout.connect(self._poll_mouse_drag_state)
 
         self._configure_window()
-        self._position_top_right()
+        self._position_center()
         self._setup_tray_and_hotkey()
 
     @property
@@ -461,11 +461,14 @@ class RadialImageConverter(QWidget):
         self.setMouseTracking(True)
         self.setFixedSize(self.WINDOW_SIZE, self.WINDOW_SIZE)
 
-    def _position_top_right(self) -> None:
+    def _position_center(self) -> None:
+        """Center the circular UI on the primary screen."""
         screen = QGuiApplication.primaryScreen()
         if screen:
             geom = screen.availableGeometry()
-            self.move(geom.right() - self.width() - 24, geom.top() + 36)
+            x = geom.left() + (geom.width() - self.width()) // 2
+            y = geom.top() + (geom.height() - self.height()) // 2
+            self.move(x, y)
 
     def start_in_stealth_armed_mode(self) -> None:
         """
@@ -498,11 +501,12 @@ class RadialImageConverter(QWidget):
             pass
 
     def _set_wheel_visible(self, visible: bool) -> None:
-        """Switch between 0ms invisible click-through stealth state and visible state."""
+        """Switch between 0ms invisible click-through stealth state and centered visible state."""
         if visible == self._wheel_shown:
             return
         self._wheel_shown = visible
         if visible:
+            self._position_center()
             self._set_win32_click_through(False)
             self.setWindowOpacity(1.0)
             self.raise_()
@@ -538,7 +542,6 @@ class RadialImageConverter(QWidget):
             if buf.value in EXPLORER_WINDOW_CLASSES:
                 return True
 
-            # Also check ForegroundWindow in case cursor is over a child shell view
             fg_hwnd = user32.GetForegroundWindow()
             if fg_hwnd:
                 user32.GetClassNameW(fg_hwnd, buf, 64)
@@ -559,20 +562,27 @@ class RadialImageConverter(QWidget):
             cur_pos = QCursor.pos()
 
             if lbutton_down and not self._mouse_was_down:
-                # Mouse button just pressed
+                # Mouse button just pressed — record start position and timestamp
+                # Hovering or single-clicking an image will NOT show the wheel
                 self._mouse_was_down = True
                 self._mouse_down_pos = cur_pos
+                self._mouse_down_time = time.monotonic()
                 self._drag_origin_is_explorer = self._is_explorer_or_desktop_under_cursor(cur_pos)
             elif lbutton_down and self._mouse_was_down:
-                # Mouse button held down — check if dragging from Explorer/Desktop
+                # Mouse button continuously held down — only trigger when held >= 180ms
+                # AND dragged >= 45px so normal selecting/clicking never triggers it
                 if (
                     self._drag_origin_is_explorer
                     and not self._wheel_shown
                     and not self._conversion_just_finished
                 ):
+                    held_sec = time.monotonic() - self._mouse_down_time
                     dx = cur_pos.x() - self._mouse_down_pos.x()
                     dy = cur_pos.y() - self._mouse_down_pos.y()
-                    if math.hypot(dx, dy) >= 14.0:
+                    if (
+                        held_sec >= self.DRAG_MIN_HOLD_SECONDS
+                        and math.hypot(dx, dy) >= self.DRAG_MIN_DISTANCE_PX
+                    ):
                         self._auto_hide_timer.stop()
                         self._set_wheel_visible(True)
             elif not lbutton_down and self._mouse_was_down:
@@ -584,7 +594,7 @@ class RadialImageConverter(QWidget):
                     and not self._manual_pin_visible
                     and not self._conversion_just_finished
                 ):
-                    # User released drag outside the wheel without converting -> hide cleanly
+                    # Released drag without dropping onto a button -> hide cleanly
                     self._auto_hide_timer.start(350)
         except Exception:  # noqa: BLE001
             pass
@@ -594,24 +604,20 @@ class RadialImageConverter(QWidget):
             self._set_wheel_visible(False)
 
     # ------------------------------------------------------------------
-    # Hotkeys & System Tray Controls
+    # Hotkeys (Ctrl+Alt+C to Activate, Ctrl+Alt+D to Disable) & System Tray
     # ------------------------------------------------------------------
     def _setup_tray_and_hotkey(self) -> None:
         self.tray_icon = QSystemTrayIcon(create_neon_tray_icon(armed=True), self)
         self.tray_icon.setToolTip(
-            "FloatConvert: ARMED (Drag any image to convert • Ctrl+Alt+D to Disable)"
+            "FloatConvert: ARMED (Ctrl+Alt+C Activate • Ctrl+Alt+D Disable)"
         )
 
         self.tray_menu = QMenu()
-        self.arm_tray_action = self.tray_menu.addAction("✓ Smart Drag Mode: ARMED (Ctrl+Alt+C)")
-        self.arm_tray_action.triggered.connect(self.toggle_armed_mode)
+        self.arm_tray_action = self.tray_menu.addAction("✓ Activate Smart Drag Mode (Ctrl+Alt+C)")
+        self.arm_tray_action.triggered.connect(self.activate_armed_mode_silently)
 
         self.disable_tray_action = self.tray_menu.addAction("Disable Smart Drag Mode (Ctrl+Alt+D)")
         self.disable_tray_action.triggered.connect(self.disable_armed_mode)
-
-        self.tray_menu.addSeparator()
-        pin_show_action = self.tray_menu.addAction("Show / Pin Wheel for Settings (Ctrl+Alt+S)")
-        pin_show_action.triggered.connect(self.toggle_manual_pin_wheel)
 
         self.tray_menu.addSeparator()
         quit_action = self.tray_menu.addAction("Quit Completely")
@@ -622,27 +628,26 @@ class RadialImageConverter(QWidget):
         self.tray_icon.show()
 
         self.hotkey_thread = GlobalHotkeyThread(self)
-        self.hotkey_thread.toggle_armed_pressed.connect(self.activate_armed_mode_silently)
-        self.hotkey_thread.disable_armed_pressed.connect(self.disable_armed_mode)
-        self.hotkey_thread.manual_show_pressed.connect(self.toggle_manual_pin_wheel)
+        self.hotkey_thread.activate_pressed.connect(self.activate_armed_mode_silently)
+        self.hotkey_thread.disable_pressed.connect(self.disable_armed_mode)
         self.hotkey_thread.start()
 
     def _update_tray_status(self) -> None:
         self.tray_icon.setIcon(create_neon_tray_icon(armed=self.is_armed))
         if self.is_armed:
-            self.arm_tray_action.setText("✓ Smart Drag Mode: ARMED (Ctrl+Alt+C)")
+            self.arm_tray_action.setText("✓ Activate Smart Drag Mode (Ctrl+Alt+C)")
             self.tray_icon.setToolTip(
-                "FloatConvert: ARMED (Drag any image to convert • Ctrl+Alt+D to Disable)"
+                "FloatConvert: ARMED (Ctrl+Alt+C Activate • Ctrl+Alt+D Disable)"
             )
         else:
-            self.arm_tray_action.setText("Smart Drag Mode: DISABLED (Press Ctrl+Alt+C to Arm)")
+            self.arm_tray_action.setText("Activate Smart Drag Mode (Ctrl+Alt+C)")
             self.tray_icon.setToolTip("FloatConvert: DISABLED (Press Ctrl+Alt+C to Activate)")
 
     def activate_armed_mode_silently(self) -> None:
         """
         Triggered by Ctrl + Alt + C:
         Activates Smart Drag Mode in 0ms WITHOUT showing the circular UI on display.
-        The UI will automatically appear the moment the user selects and drags an image.
+        The UI will automatically appear in the center when you drag an image.
         """
         self.is_armed = True
         self._manual_pin_visible = False
@@ -652,21 +657,14 @@ class RadialImageConverter(QWidget):
     def disable_armed_mode(self) -> None:
         """
         Triggered by Ctrl + Alt + D:
-        Disables Smart Drag Mode and hides the UI so selecting/moving images never triggers it.
+        Disables Smart Drag Mode and hides the UI so dragging never triggers it.
         """
         self.is_armed = False
         self._manual_pin_visible = False
         self._set_wheel_visible(False)
         self._update_tray_status()
 
-    def toggle_armed_mode(self) -> None:
-        if self.is_armed:
-            self.disable_armed_mode()
-        else:
-            self.activate_armed_mode_silently()
-
     def toggle_manual_pin_wheel(self) -> None:
-        """Triggered by Ctrl + Alt + S or clicking the System Tray icon to adjust Quality/Scale."""
         if self._wheel_shown and self._manual_pin_visible:
             self._manual_pin_visible = False
             self._set_wheel_visible(False)

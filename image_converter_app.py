@@ -13,9 +13,14 @@ How It Works:
 - Drag Any Image: Hovering or clicking to select an image will NOT trigger
   the UI. When you hold and drag an image in File Explorer or Desktop, the
   circular neon UI appears in the CENTER of your screen (0ms).
-- Drop on Any Format Button (ICO, GIF, WEBP, JPG, PNG, PDF): Converts the
-  image in its original folder, flashes the file-size saved readout, and
-  automatically disappears—while staying armed for your next image drag.
+- Two Ways to Adjust Quality & Scale:
+  1. Option 1 (Center Well "Hold & Tweak"): Drop your image inside the Center
+     Circle instead of on a format button. The wheel stays open with your
+     image staged so your mouse is free to slide the Quality Dial and click
+     the Scale preset badge—then click any format button to convert & close!
+  2. Option 3 (Mid-Drag Keys): While dragging an image over the wheel, tap
+     SPACE to cycle Scale (Original -> 1080p -> 50%) or UP/DOWN ARROW keys
+     to change Quality (5%–100%) on the fly before dropping on a format tile!
 
 Requirements:
     pip install PyQt6 Pillow pillow-heif
@@ -373,8 +378,11 @@ class RadialImageConverter(QWidget):
     """
     Circular frameless floating desktop UI that stays pre-rendered in GPU memory
     (0.0 opacity + click-through) when Armed, pops up in the CENTER of the screen
-    in 0ms when you hold and drag an image in File Explorer/Desktop, and auto-hides
-    right after conversion.
+    in 0ms when you hold and drag an image in File Explorer/Desktop, and supports:
+    - Option 1: Drop in the Center Well to "Hold & Tweak" Quality/Scale with mouse,
+      then click any format tile to convert and auto-close.
+    - Option 3: Mid-drag keyboard shortcuts (SPACE cycles Scale, UP/DOWN arrows
+      adjust Quality while dragging).
     """
 
     WINDOW_SIZE = 460
@@ -402,15 +410,20 @@ class RadialImageConverter(QWidget):
         self.merge_pdf_enabled: bool = True
         self.is_pinned: bool = True
 
-        # Smart Drag-Sense State
+        # Smart Drag-Sense & Staged (Hold & Tweak) State
         self.is_armed: bool = True
         self._wheel_shown: bool = False
         self._manual_pin_visible: bool = False
+        self._staged_files: list[Path] = []
+        self._is_dragging_over_center: bool = False
         self._conversion_just_finished: bool = False
         self._mouse_was_down: bool = False
         self._mouse_down_pos: QPoint = QPoint(0, 0)
         self._mouse_down_time: float = 0.0
         self._drag_origin_is_explorer: bool = False
+
+        # Edge-triggered key state tracking for Option 3 mid-drag shortcuts
+        self._key_was_down: dict[int, bool] = {}
 
         self.hovered_tile_idx: int | None = None
         self.drag_target_idx: int | None = None
@@ -436,7 +449,7 @@ class RadialImageConverter(QWidget):
         self._auto_hide_timer.setSingleShot(True)
         self._auto_hide_timer.timeout.connect(self._auto_hide_after_drag)
 
-        # 30ms lightweight poller that detects file drags in Explorer/Desktop
+        # 30ms lightweight poller that detects file drags + mid-drag shortcut keys
         self._drag_watch_timer = QTimer(self)
         self._drag_watch_timer.setInterval(30)
         self._drag_watch_timer.timeout.connect(self._poll_mouse_drag_state)
@@ -448,6 +461,10 @@ class RadialImageConverter(QWidget):
     @property
     def current_scale_preset(self) -> str:
         return SCALE_PRESETS[self.scale_idx]
+
+    @property
+    def has_staged_files(self) -> bool:
+        return len(self._staged_files) > 0
 
     def _configure_window(self) -> None:
         self.setWindowTitle("FloatConvert")
@@ -513,13 +530,15 @@ class RadialImageConverter(QWidget):
             self.update()
         else:
             self.is_dragging_files = False
+            self._is_dragging_over_center = False
             self.drag_target_idx = None
             self.hovered_tile_idx = None
+            self._staged_files.clear()
             self.setWindowOpacity(0.0)
             self._set_win32_click_through(True)
 
     # ------------------------------------------------------------------
-    # Smart Drag-Sense Detection (Pops up wheel in 0ms when dragging files)
+    # Smart Drag-Sense Detection & Option 3 Mid-Drag Keyboard Shortcuts
     # ------------------------------------------------------------------
     def _is_explorer_or_desktop_under_cursor(self, pt: QPoint) -> bool:
         if sys.platform != "win32":
@@ -551,6 +570,34 @@ class RadialImageConverter(QWidget):
         except Exception:  # noqa: BLE001
             return False
 
+    def _check_edge_key_press(self, user32, vk_code: int) -> bool:
+        """Return True once per key-down press using Win32 GetAsyncKeyState."""
+        is_down = (user32.GetAsyncKeyState(vk_code) & 0x8000) != 0
+        was_down = self._key_was_down.get(vk_code, False)
+        self._key_was_down[vk_code] = is_down
+        return is_down and not was_down
+
+    def _poll_mid_drag_shortcuts(self, user32) -> None:
+        """
+        Option 3: While the wheel is visible (during a drag or while staged),
+        let the user tap SPACE to cycle Scale (Original -> 1080p -> 50%) and
+        UP / DOWN arrows to adjust Quality (5%–100%) without releasing the mouse!
+        """
+        VK_SPACE = 0x20
+        VK_UP = 0x26
+        VK_DOWN = 0x28
+
+        if self._check_edge_key_press(user32, VK_SPACE):
+            self._cycle_scale_preset()
+
+        if self._check_edge_key_press(user32, VK_UP):
+            self.quality = min(100, self.quality + 5)
+            self.update()
+
+        if self._check_edge_key_press(user32, VK_DOWN):
+            self.quality = max(5, self.quality - 5)
+            self.update()
+
     def _poll_mouse_drag_state(self) -> None:
         if sys.platform != "win32" or not self.is_armed:
             return
@@ -561,16 +608,16 @@ class RadialImageConverter(QWidget):
             lbutton_down = (user32.GetAsyncKeyState(0x01) & 0x8000) != 0
             cur_pos = QCursor.pos()
 
+            # Poll Option 3 mid-drag keyboard shortcuts whenever the wheel is visible
+            if self._wheel_shown:
+                self._poll_mid_drag_shortcuts(user32)
+
             if lbutton_down and not self._mouse_was_down:
-                # Mouse button just pressed — record start position and timestamp
-                # Hovering or single-clicking an image will NOT show the wheel
                 self._mouse_was_down = True
                 self._mouse_down_pos = cur_pos
                 self._mouse_down_time = time.monotonic()
                 self._drag_origin_is_explorer = self._is_explorer_or_desktop_under_cursor(cur_pos)
             elif lbutton_down and self._mouse_was_down:
-                # Mouse button continuously held down — only trigger when held >= 180ms
-                # AND dragged >= 45px so normal selecting/clicking never triggers it
                 if (
                     self._drag_origin_is_explorer
                     and not self._wheel_shown
@@ -586,21 +633,26 @@ class RadialImageConverter(QWidget):
                         self._auto_hide_timer.stop()
                         self._set_wheel_visible(True)
             elif not lbutton_down and self._mouse_was_down:
-                # Mouse button released
                 self._mouse_was_down = False
                 self._drag_origin_is_explorer = False
                 if (
                     self._wheel_shown
                     and not self._manual_pin_visible
+                    and not self.has_staged_files
                     and not self._conversion_just_finished
                 ):
-                    # Released drag without dropping onto a button -> hide cleanly
+                    # Give a brief moment so dropEvent (on tile or center well) can fire first
                     self._auto_hide_timer.start(350)
         except Exception:  # noqa: BLE001
             pass
 
     def _auto_hide_after_drag(self) -> None:
-        if not self._manual_pin_visible and not self._conversion_just_finished and not self._mouse_was_down:
+        if (
+            not self._manual_pin_visible
+            and not self.has_staged_files
+            and not self._conversion_just_finished
+            and not self._mouse_was_down
+        ):
             self._set_wheel_visible(False)
 
     # ------------------------------------------------------------------
@@ -644,21 +696,12 @@ class RadialImageConverter(QWidget):
             self.tray_icon.setToolTip("FloatConvert: DISABLED (Press Ctrl+Alt+C to Activate)")
 
     def activate_armed_mode_silently(self) -> None:
-        """
-        Triggered by Ctrl + Alt + C:
-        Activates Smart Drag Mode in 0ms WITHOUT showing the circular UI on display.
-        The UI will automatically appear in the center when you drag an image.
-        """
         self.is_armed = True
         self._manual_pin_visible = False
         self._set_wheel_visible(False)
         self._update_tray_status()
 
     def disable_armed_mode(self) -> None:
-        """
-        Triggered by Ctrl + Alt + D:
-        Disables Smart Drag Mode and hides the UI so dragging never triggers it.
-        """
         self.is_armed = False
         self._manual_pin_visible = False
         self._set_wheel_visible(False)
@@ -698,7 +741,7 @@ class RadialImageConverter(QWidget):
         self._status_subtext = ""
         if self._conversion_just_finished:
             self._conversion_just_finished = False
-            if not self._manual_pin_visible:
+            if not self._manual_pin_visible and not self.has_staged_files:
                 self._set_wheel_visible(False)
                 return
         self.update()
@@ -715,7 +758,10 @@ class RadialImageConverter(QWidget):
             "50%": "Half Width & Height",
         }
         preset = self.current_scale_preset
-        self._show_temporary_status(f"📐 SCALE: {preset.upper()}", descriptions[preset], 1800)
+        if not self.has_staged_files:
+            self._show_temporary_status(f"📐 SCALE: {preset.upper()}", descriptions[preset], 1400)
+        else:
+            self.update()
 
     def _copy_files_to_clipboard(self, paths: list[Path]) -> None:
         if not self.auto_copy_clipboard or not paths:
@@ -745,6 +791,12 @@ class RadialImageConverter(QWidget):
     def _scale_badge_rect(self) -> QRectF:
         return QRectF(self.CENTER - 38, self.CENTER + self.INNER_WELL_RADIUS - 28, 76, 20)
 
+    def _is_inside_center_well(self, pos: QPointF) -> bool:
+        """Return True if `pos` is inside the central well (Option 1 Hold & Tweak zone)."""
+        return math.hypot(pos.x() - self.CENTER, pos.y() - self.CENTER) <= (
+            self.INNER_BEZEL_OUTER - 4.0
+        )
+
     def _quality_angle_deg(self) -> float:
         t = max(0.0, min(1.0, self.quality / 100.0))
         return self.ARC_START_DEG - t * (self.ARC_START_DEG - self.ARC_END_DEG)
@@ -766,7 +818,7 @@ class RadialImageConverter(QWidget):
             dx = pos.x() - self.CENTER
             dy = pos.y() - self.CENTER
             dist = math.hypot(dx, dy)
-            if 65.0 <= dist <= self.OUTER_RADIUS + 18.0:
+            if (self.INNER_BEZEL_OUTER - 4.0) < dist <= self.OUTER_RADIUS + 18.0:
                 best_idx = None
                 best_dist = 95.0
                 for idx, (_, _, _, angle_deg) in enumerate(RADIAL_FORMATS):
@@ -849,13 +901,17 @@ class RadialImageConverter(QWidget):
         painter.drawEllipse(center_pt, self.OUTER_RADIUS - 2.5, self.OUTER_RADIUS - 2.5)
 
         # 3. Recessed Central Torus Bezel & Clean Dark Center Well
-        bezel_glow = QRadialGradient(center_pt, self.INNER_BEZEL_OUTER + 10)
-        bezel_glow.setColorAt(0.65, QColor(0, 0, 0, 0))
-        bezel_glow.setColorAt(0.88, QColor(139, 92, 246, 85))
+        center_active = self._is_dragging_over_center or self.has_staged_files
+        bezel_glow = QRadialGradient(center_pt, self.INNER_BEZEL_OUTER + 12)
+        bezel_glow.setColorAt(0.60, QColor(0, 0, 0, 0))
+        bezel_glow.setColorAt(
+            0.86,
+            QColor(56, 189, 248, 160) if center_active else QColor(139, 92, 246, 85),
+        )
         bezel_glow.setColorAt(1.0, QColor(56, 189, 248, 0))
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(bezel_glow)
-        painter.drawEllipse(center_pt, self.INNER_BEZEL_OUTER + 10, self.INNER_BEZEL_OUTER + 10)
+        painter.drawEllipse(center_pt, self.INNER_BEZEL_OUTER + 12, self.INNER_BEZEL_OUTER + 12)
 
         bezel_grad = QLinearGradient(
             self.CENTER,
@@ -867,17 +923,29 @@ class RadialImageConverter(QWidget):
         bezel_grad.setColorAt(0.5, QColor(22, 28, 42, 250))
         bezel_grad.setColorAt(1.0, QColor(15, 20, 32, 252))
         painter.setBrush(bezel_grad)
-        painter.setPen(QPen(QColor(168, 85, 247, 110), 1.5))
+        painter.setPen(
+            QPen(
+                QColor(56, 189, 248, 220) if center_active else QColor(168, 85, 247, 110),
+                1.8 if center_active else 1.5,
+            )
+        )
         painter.drawEllipse(center_pt, self.INNER_BEZEL_OUTER, self.INNER_BEZEL_OUTER)
 
         well_grad = QRadialGradient(
             QPointF(self.CENTER - 18, self.CENTER - 18), self.INNER_WELL_RADIUS * 1.25
         )
-        well_grad.setColorAt(0.0, QColor(20, 25, 37, 252))
+        well_grad.setColorAt(
+            0.0, QColor(26, 38, 58, 252) if center_active else QColor(20, 25, 37, 252)
+        )
         well_grad.setColorAt(0.7, QColor(11, 15, 24, 254))
         well_grad.setColorAt(1.0, QColor(6, 9, 15, 255))
         painter.setBrush(well_grad)
-        painter.setPen(QPen(QColor(99, 102, 241, 90), 1.2))
+        painter.setPen(
+            QPen(
+                QColor(56, 189, 248, 190) if center_active else QColor(99, 102, 241, 90),
+                1.5 if center_active else 1.2,
+            )
+        )
         painter.drawEllipse(center_pt, self.INNER_WELL_RADIUS, self.INNER_WELL_RADIUS)
 
         # 4. Draw Curved Quality Dial & Arc Track at Bottom
@@ -887,7 +955,7 @@ class RadialImageConverter(QWidget):
         for idx in range(len(RADIAL_FORMATS)):
             self._draw_format_tile(painter, idx)
 
-        # 6. Draw Close Button, Quick Scale Preset Pill & Transient Status Readout
+        # 6. Draw Close Button, Quick Scale Preset Pill & Staged/Status Readout
         self._draw_center_overlay(painter, center_pt)
 
     def _draw_format_tile(self, painter: QPainter, idx: int) -> None:
@@ -1120,15 +1188,15 @@ class RadialImageConverter(QWidget):
         # 2. Quick Resolution Scaling Pill at the bottom of the inner well ("Original", "1080p", "50%")
         scale_rect = self._scale_badge_rect()
         is_scaled = self.scale_idx != 0
-        if self.hovered_scale_badge or is_scaled:
+        if self.hovered_scale_badge or is_scaled or self.has_staged_files:
             painter.setBrush(
-                QColor(109, 40, 217, 165) if is_scaled else QColor(51, 65, 85, 160)
+                QColor(109, 40, 217, 185) if is_scaled else QColor(51, 65, 85, 175)
             )
             painter.setPen(
                 QPen(
-                    QColor(192, 132, 252, 210)
+                    QColor(192, 132, 252, 220)
                     if is_scaled
-                    else QColor(148, 163, 184, 120),
+                    else QColor(148, 163, 184, 140),
                     1.0,
                 )
             )
@@ -1138,9 +1206,9 @@ class RadialImageConverter(QWidget):
         scale_font.setBold(True)
         painter.setFont(scale_font)
         painter.setPen(
-            QColor(233, 213, 255, 240)
-            if (self.hovered_scale_badge or is_scaled)
-            else QColor(148, 163, 184, 115)
+            QColor(233, 213, 255, 245)
+            if (self.hovered_scale_badge or is_scaled or self.has_staged_files)
+            else QColor(148, 163, 184, 130)
         )
         painter.drawText(
             scale_rect,
@@ -1148,25 +1216,58 @@ class RadialImageConverter(QWidget):
             f"📐 {self.current_scale_preset.upper()}",
         )
 
-        # 3. Transient Status & File-Size Saved Readout inside the center well
-        if self.is_dragging_files and self.drag_target_idx is not None:
+        # 3. Center Well Status: Option 1 (Hold & Tweak) / Option 3 (Mid-Drag Keys) / Saved Readout
+        if self.is_dragging_files and self._is_dragging_over_center:
+            f1 = QFont("Segoe UI", 9)
+            f1.setBold(True)
+            painter.setFont(f1)
+            painter.setPen(QColor(56, 189, 248, 250))
+            painter.drawText(
+                QRectF(self.CENTER - 74, self.CENTER - 22, 148, 18),
+                Qt.AlignmentFlag.AlignCenter,
+                "HOLD & TWEAK",
+            )
+            f2 = QFont("Segoe UI", 7)
+            painter.setFont(f2)
+            painter.setPen(QColor(203, 213, 225, 225))
+            painter.drawText(
+                QRectF(self.CENTER - 76, self.CENTER - 3, 152, 15),
+                Qt.AlignmentFlag.AlignCenter,
+                "Drop here to adjust Q/Scale",
+            )
+            painter.setPen(QColor(148, 163, 184, 180))
+            painter.drawText(
+                QRectF(self.CENTER - 76, self.CENTER + 11, 152, 14),
+                Qt.AlignmentFlag.AlignCenter,
+                f"{self.current_scale_preset} • Q:{self.quality}%",
+            )
+        elif self.is_dragging_files and self.drag_target_idx is not None:
             fmt_label = RADIAL_FORMATS[self.drag_target_idx][0]
             f1 = QFont("Segoe UI", 11)
             f1.setBold(True)
             painter.setFont(f1)
             painter.setPen(QColor(233, 213, 255, 245))
             painter.drawText(
-                QRectF(self.CENTER - 72, self.CENTER - 20, 144, 20),
+                QRectF(self.CENTER - 72, self.CENTER - 22, 144, 20),
                 Qt.AlignmentFlag.AlignCenter,
                 f"DROP → {fmt_label}",
             )
             f2 = QFont("Segoe UI", 8)
+            f2.setBold(True)
             painter.setFont(f2)
-            painter.setPen(QColor(148, 163, 184, 215))
+            painter.setPen(QColor(56, 189, 248, 235))
             painter.drawText(
-                QRectF(self.CENTER - 72, self.CENTER + 0, 144, 16),
+                QRectF(self.CENTER - 72, self.CENTER - 3, 144, 16),
                 Qt.AlignmentFlag.AlignCenter,
                 f"{self.current_scale_preset} • Q:{self.quality}%",
+            )
+            f3 = QFont("Segoe UI", 6)
+            painter.setFont(f3)
+            painter.setPen(QColor(148, 163, 184, 175))
+            painter.drawText(
+                QRectF(self.CENTER - 76, self.CENTER + 12, 152, 13),
+                Qt.AlignmentFlag.AlignCenter,
+                "Space: Scale • ↑↓: Quality",
             )
         elif self._status_text:
             f1 = QFont("Segoe UI", 9)
@@ -1188,6 +1289,39 @@ class RadialImageConverter(QWidget):
                     Qt.AlignmentFlag.AlignCenter,
                     self._status_subtext,
                 )
+        elif self.has_staged_files:
+            count = len(self._staged_files)
+            title = (
+                f"📌 {self._staged_files[0].name[:15]}"
+                if count == 1
+                else f"📌 {count} IMAGES READY"
+            )
+            f1 = QFont("Segoe UI", 8)
+            f1.setBold(True)
+            painter.setFont(f1)
+            painter.setPen(QColor(56, 189, 248, 250))
+            painter.drawText(
+                QRectF(self.CENTER - 74, self.CENTER - 22, 148, 16),
+                Qt.AlignmentFlag.AlignCenter,
+                title,
+            )
+            f2 = QFont("Segoe UI", 8)
+            f2.setBold(True)
+            painter.setFont(f2)
+            painter.setPen(QColor(233, 213, 255, 240))
+            painter.drawText(
+                QRectF(self.CENTER - 76, self.CENTER - 5, 152, 16),
+                Qt.AlignmentFlag.AlignCenter,
+                f"{self.current_scale_preset} • Q:{self.quality}%",
+            )
+            f3 = QFont("Segoe UI", 7)
+            painter.setFont(f3)
+            painter.setPen(QColor(148, 163, 184, 210))
+            painter.drawText(
+                QRectF(self.CENTER - 76, self.CENTER + 10, 152, 14),
+                Qt.AlignmentFlag.AlignCenter,
+                "Click any format to convert",
+            )
 
         painter.restore()
 
@@ -1198,6 +1332,7 @@ class RadialImageConverter(QWidget):
         pos = event.position()
         if event.button() == Qt.MouseButton.LeftButton:
             if self._close_button_rect().contains(pos):
+                self._staged_files.clear()
                 self._manual_pin_visible = False
                 self._set_wheel_visible(False)
                 return
@@ -1209,6 +1344,14 @@ class RadialImageConverter(QWidget):
             if self._hit_test_quality_arc(pos):
                 self.is_adjusting_quality = True
                 self._update_quality_from_pos(pos)
+                return
+
+            # Option 1: If files are staged in the Center Well, clicking a format tile converts them!
+            clicked_tile = self._hit_test_tile(pos, snap_nearest=False)
+            if clicked_tile is not None and self.has_staged_files:
+                files_to_convert = list(self._staged_files)
+                self._staged_files.clear()
+                self._run_conversion_batch(files_to_convert, clicked_tile)
                 return
 
             self._window_drag_offset = (
@@ -1320,11 +1463,7 @@ class RadialImageConverter(QWidget):
         chosen = menu.exec(event.globalPos())
         if chosen in scale_actions:
             self.scale_idx = scale_actions[chosen]
-            self._show_temporary_status(
-                f"📐 SCALE: {self.current_scale_preset.upper()}",
-                "Updated resize preset",
-                1600,
-            )
+            self.update()
         elif chosen == copy_act:
             self.auto_copy_clipboard = not self.auto_copy_clipboard
             state = "ON" if self.auto_copy_clipboard else "OFF"
@@ -1338,6 +1477,7 @@ class RadialImageConverter(QWidget):
             mode_txt = "Replace Original: ON" if self.replace_original else "Keep Original: ON"
             self._show_temporary_status("⚙️ MODE", mode_txt, 1600)
         elif chosen == hide_action:
+            self._staged_files.clear()
             self._manual_pin_visible = False
             self._set_wheel_visible(False)
         elif chosen == disable_action:
@@ -1346,14 +1486,22 @@ class RadialImageConverter(QWidget):
             QApplication.instance().quit()
 
     # ------------------------------------------------------------------
-    # Direct Per-Button Drag & Drop Conversion (Auto-Hides After Use)
+    # Direct Per-Button Drag & Drop OR Center-Well "Hold & Tweak" Drop
     # ------------------------------------------------------------------
+    def _update_drag_hover_state(self, pos: QPointF) -> None:
+        if self._is_inside_center_well(pos):
+            self._is_dragging_over_center = True
+            self.drag_target_idx = None
+        else:
+            self._is_dragging_over_center = False
+            self.drag_target_idx = self._hit_test_tile(pos, snap_nearest=True)
+
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
         if event.mimeData().hasUrls():
             self._auto_hide_timer.stop()
             event.acceptProposedAction()
             self.is_dragging_files = True
-            self.drag_target_idx = self._hit_test_tile(event.position(), snap_nearest=True)
+            self._update_drag_hover_state(event.position())
             self.update()
         else:
             event.ignore()
@@ -1361,9 +1509,13 @@ class RadialImageConverter(QWidget):
     def dragMoveEvent(self, event: QDragMoveEvent) -> None:
         if event.mimeData().hasUrls():
             self._auto_hide_timer.stop()
-            target_idx = self._hit_test_tile(event.position(), snap_nearest=True)
-            if target_idx != self.drag_target_idx:
-                self.drag_target_idx = target_idx
+            prev_center = self._is_dragging_over_center
+            prev_idx = self.drag_target_idx
+            self._update_drag_hover_state(event.position())
+            if (
+                self._is_dragging_over_center != prev_center
+                or self.drag_target_idx != prev_idx
+            ):
                 self.update()
             event.acceptProposedAction()
         else:
@@ -1371,19 +1523,26 @@ class RadialImageConverter(QWidget):
 
     def dragLeaveEvent(self, event) -> None:
         self.is_dragging_files = False
+        self._is_dragging_over_center = False
         self.drag_target_idx = None
         self.update()
 
     def dropEvent(self, event: QDropEvent) -> None:
         self.is_dragging_files = False
-        target_idx = self._hit_test_tile(event.position(), snap_nearest=True)
+        pos = event.position()
+        dropped_in_center = self._is_inside_center_well(pos)
+        target_idx = None if dropped_in_center else self._hit_test_tile(pos, snap_nearest=True)
+
+        self._is_dragging_over_center = False
         self.drag_target_idx = None
 
-        if not event.mimeData().hasUrls() or target_idx is None:
+        if not event.mimeData().hasUrls():
             self.update()
             return
 
         event.acceptProposedAction()
+        self._auto_hide_timer.stop()
+
         files = self._collect_image_files(event.mimeData().urls())
         if not files:
             self._show_temporary_status(
@@ -1394,6 +1553,20 @@ class RadialImageConverter(QWidget):
             )
             return
 
+        # Option 1: Dropped inside the Center Well -> Stage files & keep wheel open to tweak Quality/Scale!
+        if dropped_in_center:
+            self._staged_files = files
+            self._status_text = ""
+            self._status_subtext = ""
+            self.activateWindow()
+            self.update()
+            return
+
+        if target_idx is None:
+            self.update()
+            return
+
+        self._staged_files.clear()
         self._run_conversion_batch(files, target_idx)
 
     def _run_conversion_batch(self, files: list[Path], target_idx: int) -> None:

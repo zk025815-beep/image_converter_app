@@ -477,6 +477,8 @@ class RadialImageConverter(QWidget):
         self.setAcceptDrops(True)
         self.setMouseTracking(True)
         self.setFixedSize(self.WINDOW_SIZE, self.WINDOW_SIZE)
+        # Initialize at 0.0 opacity before show() is ever called so it never flashes on boot
+        self.setWindowOpacity(0.0)
 
     def _position_center(self) -> None:
         """Center the circular UI on the primary screen."""
@@ -492,8 +494,11 @@ class RadialImageConverter(QWidget):
         Keep the window surface mapped in GPU memory at 0.0 opacity with Win32
         click-through enabled so showing it on drag takes 0.0 milliseconds.
         """
+        self.setWindowOpacity(0.0)
         self.show()
-        self._set_wheel_visible(False)
+        self._set_wheel_visible(False, force=True)
+        # Re-apply click-through & 0.0 opacity once Windows DWM finalizes the HWND
+        QTimer.singleShot(60, lambda: self._set_wheel_visible(False, force=True))
         self._drag_watch_timer.start()
 
     def _set_win32_click_through(self, click_through: bool) -> None:
@@ -517,10 +522,15 @@ class RadialImageConverter(QWidget):
         except Exception:  # noqa: BLE001
             pass
 
-    def _set_wheel_visible(self, visible: bool) -> None:
+    def _set_wheel_visible(self, visible: bool, force: bool = False) -> None:
         """Switch between 0ms invisible click-through stealth state and centered visible state."""
-        if visible == self._wheel_shown:
+        if not force and visible == self._wheel_shown:
+            # Always enforce opacity & click-through even if state flag matches
+            if not visible:
+                self.setWindowOpacity(0.0)
+                self._set_win32_click_through(True)
             return
+
         self._wheel_shown = visible
         if visible:
             self._position_center()
@@ -698,22 +708,22 @@ class RadialImageConverter(QWidget):
     def activate_armed_mode_silently(self) -> None:
         self.is_armed = True
         self._manual_pin_visible = False
-        self._set_wheel_visible(False)
+        self._set_wheel_visible(False, force=True)
         self._update_tray_status()
 
     def disable_armed_mode(self) -> None:
         self.is_armed = False
         self._manual_pin_visible = False
-        self._set_wheel_visible(False)
+        self._set_wheel_visible(False, force=True)
         self._update_tray_status()
 
     def toggle_manual_pin_wheel(self) -> None:
         if self._wheel_shown and self._manual_pin_visible:
             self._manual_pin_visible = False
-            self._set_wheel_visible(False)
+            self._set_wheel_visible(False, force=True)
         else:
             self._manual_pin_visible = True
-            self._set_wheel_visible(True)
+            self._set_wheel_visible(True, force=True)
             self.activateWindow()
 
     def _on_tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
@@ -742,7 +752,7 @@ class RadialImageConverter(QWidget):
         if self._conversion_just_finished:
             self._conversion_just_finished = False
             if not self._manual_pin_visible and not self.has_staged_files:
-                self._set_wheel_visible(False)
+                self._set_wheel_visible(False, force=True)
                 return
         self.update()
 
@@ -1334,7 +1344,7 @@ class RadialImageConverter(QWidget):
             if self._close_button_rect().contains(pos):
                 self._staged_files.clear()
                 self._manual_pin_visible = False
-                self._set_wheel_visible(False)
+                self._set_wheel_visible(False, force=True)
                 return
 
             if self._scale_badge_rect().contains(pos):
@@ -1479,7 +1489,7 @@ class RadialImageConverter(QWidget):
         elif chosen == hide_action:
             self._staged_files.clear()
             self._manual_pin_visible = False
-            self._set_wheel_visible(False)
+            self._set_wheel_visible(False, force=True)
         elif chosen == disable_action:
             self.disable_armed_mode()
         elif chosen == quit_action:

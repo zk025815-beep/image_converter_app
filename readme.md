@@ -24,6 +24,7 @@
 | **`Space` (While Dragging)** | Cycles resolution scaling presets (`Original` → `1080p` → `50%`) live during a drag. |
 | **`↑` / `↓` Arrows (While Dragging)** | Increases or decreases compression quality (`±5%`, range `5%–100%`) live during a drag. |
 | **Mouse Scroll Wheel** | Adjusts the curved bottom Quality Dial in `5%` increments when hovering over the wheel. |
+| **Left-Click System Tray Icon** | Manually pins/unpins the wheel on screen anytime you want to adjust settings without dragging a file. |
 | **Right-Click on Wheel / Tray Icon** | Opens the quick settings menu (Resolution Scale, Auto-Copy to Clipboard, Merged vs. Separate PDF, Delete Original After Convert, Quit). |
 
 ## 🖼️ Supported Formats
@@ -64,7 +65,7 @@ The compiled application is generated inside `dist\image_converter_app\image_con
 
 ## 🚀 Windows Startup & Shortcut Setup
 
-Run this PowerShell snippet once to register **FloatConvert** in the Windows Start Menu and set it to launch automatically in Stealth Armed Mode when you sign in to Windows:
+Run this PowerShell snippet once to register **FloatConvert** in the Windows Start Menu and set it to launch automatically in Stealth Armed Mode when you sign in to Windows (with `$Shortcut.Hotkey = ""` so Windows Explorer never overrides the native `<1ms` Win32 hotkey):
 
 ```powershell
 $TargetExe = "C:\Personal projects\image_converter_app\dist\image_converter_app\image_converter_app.exe"
@@ -76,10 +77,11 @@ $StartMenuPath = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\FloatConver
 $Shortcut = $WshShell.CreateShortcut($StartMenuPath)
 $Shortcut.TargetPath = $TargetExe
 $Shortcut.WorkingDirectory = $WorkDir
+$Shortcut.Hotkey = ""
 $Shortcut.Description = "FloatConvert - Smart Drag-Activated Radial Image Converter"
 $Shortcut.Save()
 
-# Copy to Windows Startup Folder for automatic background launch
+# Copy to Windows Startup Folder for automatic background launch on boot
 Copy-Item $StartMenuPath "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\FloatConvert.lnk" -Force
 ```
 
@@ -97,11 +99,11 @@ C:\Personal projects\image_converter_app\
 
 ### Internal Architecture Breakdown
 1. **Single-Instance IPC Guard (`QLocalServer` / `QLocalSocket`)**:
-   - Ensures only one background process of FloatConvert can run at any time using the named pipe `FloatConvert_Radial_SingleInstance_Server`. Launching a second instance signals the existing instance to arm and exits cleanly.
+   - Ensures only one background process of FloatConvert can run at any time using the named pipe `FloatConvert_Radial_SingleInstance_Server`. Launching a second instance signals the existing instance to arm silently and exits cleanly.
 2. **Kernel-Level Hotkey Thread (`GlobalHotkeyThread`)**:
    - Runs a dedicated daemon `QThread` calling `ctypes.windll.user32.RegisterHotKey` and `GetMessageW` for **`Ctrl + Alt + C`** (Activate) and **`Ctrl + Alt + D`** (Disable). Because `GetMessageW` blocks at the OS kernel level, it consumes `0%` CPU while responding in `< 1ms`.
 3. **Zero-Reload Stealth Window Management (`_set_wheel_visible` & `_set_win32_click_through`)**:
-   - Calling standard `hide()` and `show()` on translucent windows forces Windows DWM to deallocate and recreate the GPU surface. FloatConvert keeps the window mapped permanently in VRAM and toggles between `setWindowOpacity(0.0)` with Win32 extended style `WS_EX_LAYERED | WS_EX_TRANSPARENT` (100% invisible and click-through) and `setWindowOpacity(1.0)` centered on the active monitor.
+   - Calling standard `hide()` and `show()` on translucent windows forces Windows DWM to deallocate and recreate the GPU surface. FloatConvert initializes at `0.0` opacity prior to `show()`, keeps the window mapped permanently in VRAM, and toggles between `setWindowOpacity(0.0)` with Win32 extended style `WS_EX_LAYERED | WS_EX_TRANSPARENT` (`force=True` synced after DWM handle creation so it never flashes on first boot) and `setWindowOpacity(1.0)` centered on the active monitor.
 4. **Smart Drag-Sense Poller (`_poll_mouse_drag_state`)**:
    - A lightweight `30ms` `QTimer` monitors `GetAsyncKeyState(VK_LBUTTON)` and checks if the mouse press originated inside a Windows Explorer or Desktop window (`CabinetWClass`, `ExploreWClass`, `Progman`, `WorkerW`, `#32770`).
    - To prevent false triggers when hovering or clicking to select files, the wheel only appears after the left mouse button is held continuously for `>= 180ms` and dragged `>= 45px`.

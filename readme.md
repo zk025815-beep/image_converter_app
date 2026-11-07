@@ -1,74 +1,14 @@
-# ⚡ FloatConvert — Smart Drag-Activated Radial Neon Image Converter
+⚡ FloatConvert — Smart Drag-Activated Radial Neon Image & Document ConverterFloatConvert is a zero-latency, frameless floating desktop utility for Windows built with Python, PyQt6, Pillow, PyMuPDF (fitz), python-docx, and Win32 API (ctypes). It launches silently in Inactive Mode on startup, activates on demand with Ctrl + Alt + C (auto-deactivating after 5 minutes of idle time), pops up a circular neon radial UI in the center of your screen only when you drag a supported image, PDF, or Word file, and converts files in place with a live 0% – 100% circular neon progress indicator.✨ Key FeaturesInactive by Default & 5-Minute Auto-Deactivation: Starts silently in Inactive Mode when you boot your laptop so it never triggers unexpectedly. Pressing Ctrl + Alt + C manually enables Smart Drag Mode and starts a 5-minute inactivity countdown (INACTIVITY_TIMEOUT_MS = 300,000 ms) that resets on every conversion and automatically deactivates the tool after 5 minutes of idle time.Supported-Format-Only Drag Probe: Uses an imperceptible (alpha = 2/255) Win32 OLE drop-target probe under the cursor when a drag gesture starts (>= 180ms hold and >= 45px movement) in File Explorer or on the Desktop. The circular neon UI only appears if the dragged selection consists of supported image, .pdf, or .docx/.doc files—staying completely hidden when dragging unsupported files (.mp4, .zip, .exe, .txt, folders) or empty selection boxes.7 Integrated Radial Format Tiles (ICO, GIF, WEBP, JPG, PNG, PDF, WORD):Image Conversion: Drop one or more images onto ICO, GIF, WEBP, JPG, PNG, or PDF.1:1 PDF → Editable Word (.docx): Drop any .pdf onto WORD to reconstruct a fully editable Word document that preserves original fonts, sizes, colors, centered headers, underlined links, full-width horizontal section divider lines (<w:pBdr>), native hanging-indent bullet points, multi-column tab stops, tables, images, and single-page vertical spacing.Word → Print-Ready PDF (.pdf): Drop any .docx or .doc file onto PDF to generate a print-ready PDF using native Word COM (ExportAsFixedFormat) or the built-in thread-safe PyMuPDF multi-page ISO A4 vector PDF renderer.PDF → High-DPI Images: Drop any .pdf onto JPG, PNG, or WEBP to export its pages as crisp images.Print-Grade ISO A4 Image-to-PDF Layout (compose_a4_pdf_page): Converting single or multiple images to PDF places each image onto a standardized ISO A4 page (210 mm × 297 mm), automatically selects Portrait (height >= width) or Landscape (width > height) orientation per image after EXIF rotation, maintains uniform 15 mm white margins on all four sides, and scales proportionally (LANCZOS) without stretching, cropping, or overflowing.Live Numbered Percentage Circular Loading Indicator (0% – 100%): All conversions run asynchronously on a background QThread (ConversionWorkerThread) while the Center Well displays a proportional neon progress ring, rotating comet highlight, and live 0% – 100% numeric counter.Two Ways to Adjust Compression Quality & Resolution Scale:Center Well "Hold & Tweak" Mode: Drop files inside the center circle instead of on a format tile to stage them and keep the wheel open. Adjust the curved bottom Quality Dial (5%–100%) or click the 📐 Scale badge (Original, 1080p, 50%), then click any format tile to convert and auto-close.Mid-Drag Keyboard Shortcuts: While dragging files over the wheel, tap Space to cycle resolution scaling (Original → 1080p → 50%) or tap Up / Down Arrow to adjust quality (±5%) on the fly before dropping.Full iPhone .HEIC / .HEIF Support: Powered by pillow-heif, enabling direct conversion of iPhone .heic photos into JPG, PNG, WEBP, ICO, GIF, PDF, or WORD.File-Size Saved Readout & Auto-Clipboard Copy: Displays the exact percentage and size reduction (e.g., -78% • 1.4 MB saved) and automatically copies converted output files (CF_HDROP) to the Windows Clipboard for immediate pasting (Ctrl + V).Built-In Gumroad / Offline Pro Licensing: Includes LicenseActivationDialog and verify_and_save_license_key() (ENFORCE_PRO_LICENSE toggle + Gumroad /v2/licenses/verify API + offline master keys) for commercial distribution.🎮 Controls, Hotkeys & InteractionsAction / ShortcutFunctionCtrl + Alt + CActivate (Arm) Smart Drag Mode silently and start the 5-minute inactivity countdown (System Tray icon glows neon purple/cyan).Ctrl + Alt + DDisable (Disarm) Smart Drag Mode immediately (System Tray icon turns dim gray; also triggers automatically after 5 minutes idle).Drag Supported File → Format TileConverts the dragged image, .pdf, or .docx/.doc to the target format in the same folder with a live 0%–100% progress ring, copies to clipboard, and auto-hides.Drag Supported File → Center WellStages the file(s) in Hold & Tweak mode and keeps the wheel open so you can adjust Quality and Scale with your mouse before clicking a format tile.Space (While Dragging)Cycles resolution scaling presets (Original → 1080p → 50%) live during a drag.↑ / ↓ Arrows (While Dragging)Increases or decreases compression quality (±5%, range 5%–100%) live during a drag.Mouse Scroll WheelAdjusts the curved bottom Quality Dial in 5% increments when hovering over the wheel.Left-Click System Tray IconManually opens/pins or hides the radial wheel on screen at any time.Right-Click on Wheel / Tray IconOpens the settings menu (Pro License Activation, Resolution Scale, Auto-Copy to Clipboard, Merged vs. Separate A4 PDF, Delete Original After Convert, Disable, Quit).🖼️ Supported FormatsDirectionFormats SupportedSupported Input FormatsImages: .heic, .heif, .jpg, .jpeg, .png, .webp, .bmp, .gif, .tiff, .tif, .ico, .ppm, .pgm, .jfif, .avifDocuments: .pdf, .docx, .docOutput Formats (7 Radial Tiles)ICO (.ico), GIF (.gif), WEBP (.webp), JPG (.jpg), PNG (.png), PDF (.pdf — ISO A4 single/merged images or Word-to-PDF), WORD (.docx — 1:1 editable PDF-to-Word or Image-to-Word)🛠️ Installation & Local Development1. PrerequisitesOS: Windows 10 or Windows 11Python: Python 3.10+ (Python 3.12 recommended)2. Install Dependenciespip install PyQt6 Pillow pillow-heif PyMuPDF pdf2docx python-docx pdfplumber pypdf pyinstaller
+3. Run from Sourcepython image_converter_app.py
+📦 Building the Fast Standalone Executable (--onedir)To avoid the startup unpacking delay of --onefile, build FloatConvert using PyInstaller's --onedir mode in your Python 3.12 environment:cd "C:\Personal projects\image_converter_app"
+Stop-Process -Name "image_converter_app" -Force -ErrorAction SilentlyContinue
 
-**FloatConvert** is a zero-latency, frameless floating desktop utility for Windows built with **Python**, **PyQt6**, **Pillow**, and **Win32 API (`ctypes`)**. It stays completely invisible in stealth background mode until you start dragging an image in File Explorer or on your Desktop, pops up a circular neon radial UI in the center of your screen (`0ms`), converts dropped images directly inside their original folder, and automatically disappears once the conversion finishes.
+& "C:\Users\Ghulam-Hur\AppData\Local\Programs\Python\Python312\python.exe" -m pip install PyQt6 Pillow pillow-heif PyMuPDF pdf2docx python-docx pdfplumber pypdf pyinstaller
 
-## ✨ Key Features
+& "C:\Users\Ghulam-Hur\AppData\Local\Programs\Python\Python312\python.exe" -m PyInstaller --noconfirm --noconsole --onedir --clean --collect-all pillow_heif --collect-all docx --collect-all pdf2docx --collect-all fitz --exclude-module matplotlib --exclude-module pandas --exclude-module scipy --exclude-module torch --exclude-module IPython --exclude-module pytest image_converter_app.py
 
-- **Zero-Latency Stealth Drag-Sense Mode**: Runs silently in the background with `0%` idle CPU usage and pre-mapped GPU memory (`WS_EX_LAYERED | WS_EX_TRANSPARENT`). Hovering or clicking to select files never triggers the UI—it only appears in the center of your screen when you actively hold and drag an image (`>= 180ms` hold and `>= 45px` drag distance).
-- **Direct Per-Button Drag & Drop**: Six 3D beveled radial format tiles (**ICO**, **GIF**, **WEBP**, **JPG**, **PNG**, **PDF**) act as individual drop targets. Dropping one or more images onto a tile converts them in place inside the source folder and auto-hides the wheel.
-- **Two Ways to Adjust Compression Quality & Resolution Scale**:
-  - **Center Well "Hold & Tweak" Mode**: Drop an image inside the center circle instead of on a format tile to stage the file and keep the wheel open. Use your mouse to drag the curved bottom **Quality Dial (`5%–100%`)** or click the **`📐 Scale` badge (`Original`, `1080p`, `50%`)**, then click any format button to convert and auto-close.
-  - **Mid-Drag Keyboard Shortcuts**: While dragging an image over the wheel, tap **`Space`** to cycle resolution scaling (`Original → 1080p → 50%`) or tap **`Up / Down Arrow`** to adjust quality (`±5%`) on the fly before releasing the mouse button.
-- **Full iPhone `.HEIC` / `.HEIF` Support**: Powered by `pillow-heif`, allowing direct drag-and-drop conversion of iPhone `.heic` photos into `JPG`, `PNG`, `WEBP`, `ICO`, `GIF`, or `PDF`.
-- **Multi-Image to Single Merged PDF**: Dropping 2 or more images onto the **PDF** tile automatically merges them into a single multi-page `<first_image>_merged.pdf` file in the same folder.
-- **File-Size Saved Readout & Auto-Clipboard Copy**: Displays the exact percentage and megabytes/kilobytes saved (e.g., `-78% • 1.4 MB saved`) in the center well and automatically copies the converted file (`CF_HDROP`) to the Windows Clipboard for immediate pasting (`Ctrl + V`) into WhatsApp, Discord, or video editors.
-
-## 🎮 Controls, Hotkeys & Interactions
-
-| Action / Shortcut | Function |
-| :--- | :--- |
-| **`Ctrl + Alt + C`** | **Activate (Arm)** Smart Drag Mode silently in the background (System Tray icon glows neon purple/cyan). |
-| **`Ctrl + Alt + D`** | **Disable (Disarm)** Smart Drag Mode completely so dragging files never triggers the UI (System Tray icon turns dim gray). |
-| **Drag Image → Format Tile** | Immediately converts the image(s) to that format in the same folder, flashes the size-saved badge, and auto-hides. |
-| **Drag Image → Center Well** | Stages the image(s) in **Hold & Tweak** mode and keeps the wheel open so you can adjust Quality and Scale with your mouse before clicking a format tile. |
-| **`Space` (While Dragging)** | Cycles resolution scaling presets (`Original` → `1080p` → `50%`) live during a drag. |
-| **`↑` / `↓` Arrows (While Dragging)** | Increases or decreases compression quality (`±5%`, range `5%–100%`) live during a drag. |
-| **Mouse Scroll Wheel** | Adjusts the curved bottom Quality Dial in `5%` increments when hovering over the wheel. |
-| **Left-Click System Tray Icon** | Manually pins/unpins the wheel on screen anytime you want to adjust settings without dragging a file. |
-| **Right-Click on Wheel / Tray Icon** | Opens the quick settings menu (Resolution Scale, Auto-Copy to Clipboard, Merged vs. Separate PDF, Delete Original After Convert, Quit). |
-
-## 🖼️ Supported Formats
-
-| Direction | Formats Supported |
-| :--- | :--- |
-| **Input Formats** | `.heic`, `.heif`, `.jpg`, `.jpeg`, `.png`, `.webp`, `.bmp`, `.gif`, `.tiff`, `.tif`, `.ico`, `.ppm`, `.pgm`, `.jfif`, `.avif` |
-| **Output Formats (Radial Tiles)** | **WEBP** (`.webp`), **PNG** (`.png`), **JPG** (`.jpg`), **ICO** (`.ico`), **GIF** (`.gif`), **PDF** (`.pdf` — single or multi-page merged) |
-
-## 🛠️ Installation & Local Development
-
-### 1. Prerequisites
-- **OS**: Windows 10 or Windows 11
-- **Python**: Python 3.10+
-
-### 2. Install Dependencies
-```powershell
-pip install PyQt6 Pillow pillow-heif pyinstaller
-```
-
-### 3. Run from Source
-```powershell
-python image_converter_app.py
-```
-
-## 📦 Building the Fast Standalone Executable (`--onedir`)
-
-To avoid the startup unpacking delay of `--onefile`, build FloatConvert using PyInstaller's `--onedir` mode and exclude unused heavy scientific libraries:
-
-```powershell
-cd "C:\Personal projects\image_converter_app"
-taskkill /F /IM image_converter_app.exe /T 2>$null
-
-pyinstaller --noconfirm --noconsole --onedir --collect-all pillow_heif --exclude-module numpy --exclude-module pandas --exclude-module matplotlib --exclude-module torch --exclude-module scipy image_converter_app.py
-```
-
-The compiled application is generated inside `dist\image_converter_app\image_converter_app.exe` alongside its `_internal\` dependencies folder.
-
-## 🚀 Windows Startup & Shortcut Setup
-
-Run this PowerShell snippet once to register **FloatConvert** in the Windows Start Menu and set it to launch automatically in Stealth Armed Mode when you sign in to Windows (with `$Shortcut.Hotkey = ""` so Windows Explorer never overrides the native `<1ms` Win32 hotkey):
-
-```powershell
-$TargetExe = "C:\Personal projects\image_converter_app\dist\image_converter_app\image_converter_app.exe"
+Start-Process "C:\Personal projects\image_converter_app\dist\image_converter_app\image_converter_app.exe"
+The compiled application is generated inside dist\image_converter_app\image_converter_app.exe alongside its _internal\ dependencies folder.🚀 Windows Startup & Shortcut SetupRun this PowerShell snippet once to register FloatConvert in the Windows Start Menu and launch it automatically in Inactive Stealth Mode when you sign in to Windows:$TargetExe = "C:\Personal projects\image_converter_app\dist\image_converter_app\image_converter_app.exe"
 $WorkDir   = "C:\Personal projects\image_converter_app\dist\image_converter_app"
 $WshShell  = New-Object -ComObject WScript.Shell
 
@@ -78,41 +18,17 @@ $Shortcut = $WshShell.CreateShortcut($StartMenuPath)
 $Shortcut.TargetPath = $TargetExe
 $Shortcut.WorkingDirectory = $WorkDir
 $Shortcut.Hotkey = ""
-$Shortcut.Description = "FloatConvert - Smart Drag-Activated Radial Image Converter"
+$Shortcut.Description = "FloatConvert - Smart Drag-Activated Radial Image & Document Converter"
 $Shortcut.Save()
 
-# Copy to Windows Startup Folder for automatic background launch on boot
+# Copy to Windows Startup Folder for automatic background launch on boot (starts Inactive by default)
 Copy-Item $StartMenuPath "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\FloatConvert.lnk" -Force
-```
-
-## 🏗️ Project Architecture & Technical Documentation
-
-```text
-C:\Personal projects\image_converter_app\
-├── image_converter_app.py        # Complete application source code (UI, Win32 hooks, conversion engine)
+🏗️ Project Architecture & Technical DocumentationC:\Personal projects\image_converter_app\
+├── image_converter_app.py        # Complete application source code (UI, Win32 hooks, A4 PDF & 1:1 Word engines)
+├── FloatConvert_Installer.iss    # Inno Setup script for building FloatConvert_Setup_v1.0.exe
 ├── README.md                     # Project documentation
 └── dist\
     └── image_converter_app\
-        ├── _internal\            # Pre-extracted Qt6, Pillow, and libheif runtime binaries
+        ├── _internal\            # Pre-extracted Qt6, Pillow, PyMuPDF, python-docx & libheif binaries
         └── image_converter_app.exe  # Fast-launching Windows executable
-```
-
-### Internal Architecture Breakdown
-1. **Single-Instance IPC Guard (`QLocalServer` / `QLocalSocket`)**:
-   - Ensures only one background process of FloatConvert can run at any time using the named pipe `FloatConvert_Radial_SingleInstance_Server`. Launching a second instance signals the existing instance to arm silently and exits cleanly.
-2. **Kernel-Level Hotkey Thread (`GlobalHotkeyThread`)**:
-   - Runs a dedicated daemon `QThread` calling `ctypes.windll.user32.RegisterHotKey` and `GetMessageW` for **`Ctrl + Alt + C`** (Activate) and **`Ctrl + Alt + D`** (Disable). Because `GetMessageW` blocks at the OS kernel level, it consumes `0%` CPU while responding in `< 1ms`.
-3. **Zero-Reload Stealth Window Management (`_set_wheel_visible` & `_set_win32_click_through`)**:
-   - Calling standard `hide()` and `show()` on translucent windows forces Windows DWM to deallocate and recreate the GPU surface. FloatConvert initializes at `0.0` opacity prior to `show()`, keeps the window mapped permanently in VRAM, and toggles between `setWindowOpacity(0.0)` with Win32 extended style `WS_EX_LAYERED | WS_EX_TRANSPARENT` (`force=True` synced after DWM handle creation so it never flashes on first boot) and `setWindowOpacity(1.0)` centered on the active monitor.
-4. **Smart Drag-Sense Poller (`_poll_mouse_drag_state`)**:
-   - A lightweight `30ms` `QTimer` monitors `GetAsyncKeyState(VK_LBUTTON)` and checks if the mouse press originated inside a Windows Explorer or Desktop window (`CabinetWClass`, `ExploreWClass`, `Progman`, `WorkerW`, `#32770`).
-   - To prevent false triggers when hovering or clicking to select files, the wheel only appears after the left mouse button is held continuously for `>= 180ms` and dragged `>= 45px`.
-   - While the wheel is visible on screen, `_poll_mid_drag_shortcuts` reads edge-triggered `VK_SPACE`, `VK_UP`, and `VK_DOWN` states via `GetAsyncKeyState` so the user can change resolution scale and compression quality mid-drag even while File Explorer holds keyboard focus.
-5. **Image Conversion & PDF Merging Engine (`convert_single_image`, `convert_images_to_merged_pdf`)**:
-   - Registers `pillow_heif.register_heif_opener()` at startup for seamless `.heic` / `.heif` decoding.
-   - Applies EXIF orientation correction (`ImageOps.exif_transpose`), optional Lanczos downscaling (`1080p` max dimension or `50%` dimensions), and automatic alpha-channel flattening onto a white RGB canvas when exporting transparent images to `JPG` or `PDF`.
-   - Protects original files from accidental overwrite collisions by writing to temporary files or incrementing suffixes (`_1`, `_2`) unless **Delete Original After Convert** is explicitly enabled.
-
-## 👤 Author
-
-**Zeeshan Khan**
+Internal Architecture BreakdownSingle-Instance IPC Guard (QLocalServer / QLocalSocket):Ensures only one background process of FloatConvert runs at any time via FloatConvert_Radial_SingleInstance_Server.Inactive-on-Boot Lifecycle & 5-Minute Auto-Off Timer (_inactivity_timer):Starts with self.is_armed = False and _drag_watch_timer stopped (0% CPU). Pressing Ctrl + Alt + C arms the poller and starts a 5-minute QTimer that resets on every user interaction and automatically calls disable_armed_mode() after 5 minutes idle.Imperceptible OLE Format Probe (_start_invisible_drag_probe):Because Windows 11 DWM skips 0.0-opacity windows during DoDragDrop hit-testing, FloatConvert paints an imperceptible alpha = 2/255 (0.7% opacity) probe surface under the cursor for a single frame once a drag exceeds 180ms and 45px.When dragEnterEvent fires (< 15ms), _collect_supported_files verifies that all dragged items belong to SUPPORTED_INPUT_EXTS. Supported files snap the wheel to the center of the screen at 100% opacity; unsupported files abort the probe immediately so the wheel stays hidden.1:1 Precision PDF-to-Word Reconstruction Engine (convert_pdf_to_word_docx):Extracts exact page dimensions, margins, visual horizontal text lines (clustered by vertical midpoint ymid), font families, point sizes, RGB colors, hyperlink underlines, and full-width horizontal vector rules (_extract_page_layout_fitz / _extract_page_layout_pdfplumber).Reconstructs native Word paragraphs (_build_precision_docx_from_pages) with full-width bottom borders (<w:pBdr><w:bottom .../>), true hanging-indent bullets (left_indent + negative first_line_indent + tab stops), multi-column tab stops, and compensated vertical leading (0.22 × font_size) so single-page resumes and documents fit on a single page in Word.Automatically routes multi-cell grid tables through pdf2docx followed by _repair_pdf2docx_xml (which unwraps nested <w:r><w:hyperlink> tags and removes artificial right indents).ISO A4 PDF Composer & Thread-Safe Word-to-PDF Engine (compose_a4_pdf_page, convert_word_to_pdf_file):Normalizes all image-to-PDF conversions onto 210 mm × 297 mm ISO A4 canvases (auto Portrait/Landscape) with 15 mm uniform margins and centered LANCZOS scaling.Converts Word documents to PDF on a background QThread using powershell -STA Word COM (ExportAsFixedFormat) or PyMuPDF (fitz.Story / insert_htmlbox) with zero main-thread blocking.👤 AuthorZeeshan Khan

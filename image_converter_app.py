@@ -1,39 +1,37 @@
 #!/usr/bin/env python3
 """
-FloatConvert — Smart Drag-Activated Radial Neon Image Converter (Commercial Edition)
-====================================================================================
+FloatConvert — Smart Drag-Activated Radial Neon Image & Document Converter
+==========================================================================
 A frameless, always-on-top circular desktop UI with glowing neon accents,
-zero-latency stealth activation, and built-in Gumroad / Offline License Key
-verification for commercial distribution.
+zero-latency stealth activation, integrated 1:1 PDF ⇄ Word conversion,
+real-time percentage circular loading indicator, and built-in Gumroad /
+Offline License Key verification for commercial distribution.
 
 How It Works:
-- Inactive by Default on Startup: When you boot your laptop or launch the app,
-  FloatConvert starts silently in Inactive Mode so it never pops up unexpectedly.
-- Press Ctrl + Alt + C: Manually activates (Arms) Smart Drag Mode and starts a
-  5-minute inactivity timer (resets on every use; automatically deactivates
-  after 5 minutes of inactivity).
-- Press Ctrl + Alt + D: Manually disables Smart Drag Mode at any time.
-- Supported Formats Only: When Armed, the circular neon UI only appears when you
-  drag a supported image format (.jpg, .png, .webp, .heic, .heif, .bmp, .gif,
-  .tiff, .ico, .avif, etc.). Dragging unsupported files (.pdf, .docx, .mp4,
-  .zip, .txt, folders) or empty selection boxes keeps the UI completely hidden.
-- Two Ways to Adjust Quality & Scale:
-  1. Option 1 (Center Well "Hold & Tweak"): Drop your image inside the Center
-     Circle instead of on a format button. The wheel stays open with your
-     image staged so your mouse is free to slide the Quality Dial and click
-     the Scale preset badge—then click any format button to convert & close!
-  2. Option 3 (Mid-Drag Keys): While dragging an image over the wheel, tap
-     SPACE to cycle Scale (Original -> 1080p -> 50%) or UP/DOWN ARROW keys
-     to change Quality (5%–100%) on the fly before dropping on a format tile!
-
-Commercial Licensing Configuration:
-- Set `ENFORCE_PRO_LICENSE = True` before building your public customer
-  installer to lock Pro features (PDF Merge, HEIC, Scaling, ICO/GIF) behind
-  Gumroad license verification.
-- Master Offline Test Key: `FLOAT-PRO-2026`
+1. Inactive by Default on Startup:
+   When you open your laptop or launch the app, FloatConvert starts silently in
+   Inactive Mode so it never triggers unexpectedly.
+2. Press Ctrl + Alt + C to Enable (Auto-Off After 5 Minutes Idle):
+   Activates Smart Drag Mode and starts a 5-minute inactivity countdown (resets
+   on every use; automatically deactivates after 5 minutes of idle time).
+   Press Ctrl + Alt + D to disable manually at any time.
+3. Drag & Drop Supported Files Directly onto the Radial Wheel:
+   When active, dragging a supported image (.jpg, .png, .webp, .heic, .gif,
+   .bmp, .tiff, .ico, .avif) OR document (.pdf, .docx, .doc) pops up the
+   circular neon UI in the center of your screen:
+   - Drop an Image onto `ICO`, `GIF`, `WEBP`, `JPG`, `PNG`, or `PDF` to convert.
+   - Drop a `.pdf` onto `WORD` to convert PDF → Editable Word (`.docx`) with
+     1:1 layout, font, spacing, bullet, horizontal line, table, margin, and
+     hyperlink preservation.
+   - Drop a `.docx` / `.doc` onto `PDF` to convert Word → Print-Ready `.pdf`.
+   - Drop a `.pdf` onto `JPG` / `PNG` / `WEBP` to export PDF pages as images.
+4. Real-Time Numbered Percentage Circular Loading Indicator:
+   During conversion, the center well displays a rotating neon progress ring
+   with a live `0% – 100%` percentage counter, then automatically copies the
+   converted file to your clipboard and hides the wheel when complete.
 
 Requirements:
-    pip install PyQt6 Pillow pillow-heif
+    pip install PyQt6 Pillow pillow-heif PyMuPDF pdf2docx python-docx pypdf
 
 Usage:
     pythonw image_converter_app.py
@@ -41,14 +39,28 @@ Usage:
 
 from __future__ import annotations
 
+import html
+import io
 import json
+import logging
 import math
+import re
+import subprocess
 import sys
 import time
 import urllib.parse
 import urllib.request
+from copy import deepcopy
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
+
+# Prevent crashes in PyInstaller `--noconsole` (`pythonw`) builds where
+# `sys.stdout` and `sys.stderr` are `None` (libraries like `pdf2docx` write
+# progress logs to `sys.stdout` and crash if it is `None`).
+if sys.stdout is None:
+    sys.stdout = io.StringIO()
+if sys.stderr is None:
+    sys.stderr = io.StringIO()
 
 from PIL import Image, ImageOps
 
@@ -119,7 +131,7 @@ GUMROAD_PRODUCT_PERMALINK = "floatconvert"
 MASTER_OFFLINE_KEYS = {"FLOAT-PRO-2026", "ZEESHAN-PRO-VIP"}
 
 LICENSE_FILE_PATH = Path.home() / ".floatconvert_license.json"
-PRO_ONLY_FORMATS = {"ICO", "GIF", "PDF"}
+PRO_ONLY_FORMATS = {"ICO", "GIF", "PDF", "WORD"}
 
 # Auto-deactivate Smart Drag Mode after 5 minutes (300,000 ms) of inactivity
 INACTIVITY_TIMEOUT_MS = 5 * 60 * 1000
@@ -129,8 +141,8 @@ A4_SHORT_MM = 210.0
 A4_LONG_MM = 297.0
 A4_MARGIN_MM = 15.0
 
-# Supported input extensions (including iPhone .heic / .heif)
-SUPPORTED_INPUT_EXTS = {
+# Image input extensions (including iPhone .heic / .heif)
+IMAGE_INPUT_EXTS = {
     ".heic",
     ".heif",
     ".jpg",
@@ -148,14 +160,23 @@ SUPPORTED_INPUT_EXTS = {
     ".avif",
 }
 
-# (Label, Extension, Pillow Format, Angle in degrees [0=Right, 90=Bottom, 180=Left, 270=Top])
+# Document input extensions supported directly in the radial UI
+WORD_INPUT_EXTS = {".docx", ".doc"}
+PDF_INPUT_EXTS = {".pdf"}
+
+# All supported input extensions that trigger the radial wheel on drag
+SUPPORTED_INPUT_EXTS = IMAGE_INPUT_EXTS | WORD_INPUT_EXTS | PDF_INPUT_EXTS
+
+# 7 Radial Format Tiles arranged around the upper ring (evenly spaced by 33°):
+# (Label, Extension, Target Format Key, Angle in degrees [0=Right, 90=Bottom, 180=Left, 270=Top])
 RADIAL_FORMATS = [
-    ("ICO", ".ico", "ICO", 140.0),
-    ("GIF", ".gif", "GIF", 178.0),
-    ("WEBP", ".webp", "WEBP", 216.0),
-    ("JPG", ".jpg", "JPEG", 254.0),
-    ("PNG", ".png", "PNG", 292.0),
-    ("PDF", ".pdf", "PDF", 330.0),
+    ("ICO", ".ico", "ICO", 138.0),
+    ("GIF", ".gif", "GIF", 171.0),
+    ("WEBP", ".webp", "WEBP", 204.0),
+    ("JPG", ".jpg", "JPEG", 237.0),
+    ("PNG", ".png", "PNG", 270.0),
+    ("PDF", ".pdf", "PDF", 303.0),
+    ("WORD", ".docx", "DOCX", 336.0),
 ]
 
 SCALE_PRESETS = ["Original", "1080p", "50%"]
@@ -199,7 +220,6 @@ def verify_and_save_license_key(license_key: str) -> tuple[bool, str]:
         _save_license_file(cleaned.upper(), "offline_master")
         return True, "Pro License activated! All features unlocked."
 
-    # Verify via Gumroad API (/v2/licenses/verify) using standard library urllib
     try:
         payload = urllib.parse.urlencode(
             {
@@ -303,8 +323,8 @@ class LicenseActivationDialog(QDialog):
         layout.addWidget(header)
 
         sub = QLabel(
-            "Enter your Gumroad license key to unlock multi-page PDF merging, "
-            "iPhone .HEIC support, and 1080p/50% scaling."
+            "Enter your Gumroad license key to unlock PDF ⇄ Word conversion, "
+            "multi-page PDF merging, iPhone .HEIC support, and 1080p/50% scaling."
         )
         sub.setObjectName("Sub")
         sub.setWordWrap(True)
@@ -342,6 +362,9 @@ class LicenseActivationDialog(QDialog):
             self.feedback_label.setText(msg)
 
 
+# ----------------------------------------------------------------------
+# Global Hotkeys (Ctrl+Alt+C to Activate, Ctrl+Alt+D to Disable)
+# ----------------------------------------------------------------------
 class GlobalHotkeyThread(QThread):
     """
     Listens for native Windows Win32 hotkeys with 0% CPU usage and <1ms latency:
@@ -384,6 +407,9 @@ class GlobalHotkeyThread(QThread):
             pass
 
 
+# ----------------------------------------------------------------------
+# System Tray Icon & Formatting Helpers
+# ----------------------------------------------------------------------
 def create_neon_tray_icon(armed: bool = False) -> QIcon:
     """Generate a crisp circular icon for the System Tray (Neon when Armed, Dim when Inactive)."""
     pix = QPixmap(64, 64)
@@ -489,7 +515,6 @@ def compose_a4_pdf_page(img: Image.Image, scale_preset: str = "Original") -> tup
     long_px = int(round((A4_LONG_MM / 25.4) * dpi))
     margin_px = int(round((A4_MARGIN_MM / 25.4) * dpi))
 
-    # Automatically choose Landscape if image is wider than tall, else Portrait
     if rgb.width > rgb.height:
         page_w, page_h = long_px, short_px
     else:
@@ -498,7 +523,6 @@ def compose_a4_pdf_page(img: Image.Image, scale_preset: str = "Original") -> tup
     avail_w = max(1, page_w - 2 * margin_px)
     avail_h = max(1, page_h - 2 * margin_px)
 
-    # Fit inside the usable margin box while strictly preserving aspect ratio
     fit_scale = min(avail_w / max(1, rgb.width), avail_h / max(1, rgb.height))
     target_w = max(1, min(avail_w, int(round(rgb.width * fit_scale))))
     target_h = max(1, min(avail_h, int(round(rgb.height * fit_scale))))
@@ -524,6 +548,1158 @@ def _unique_output_path(parent_dir: Path, stem: str, target_ext: str) -> Path:
     return candidate
 
 
+# ----------------------------------------------------------------------
+# 1:1 Precision PDF ⇄ Word Conversion Engine (Fonts, Lines, Bullets, Tables)
+# ----------------------------------------------------------------------
+_SUBSET_FONT_RE = re.compile(r"^[A-Z]{6}\+")
+_PDF2DOCX_STAGE_RE = re.compile(r"\((\d+)/4\)\s*Page\s*(\d+)", re.IGNORECASE)
+_BULLET_CHARS = {"•", "●", "▪", "◦", "‣", "⁃", "–", "-"}
+
+
+def _clean_font_and_style(raw_font: str | None, flags: int = 0) -> tuple[str, bool, bool]:
+    """
+    Map embedded PDF font names (e.g. `BCDEEE+Calibri-Bold`, `TimesNewRomanPSMT`)
+    and MuPDF flags to clean Word font families and `(is_bold, is_italic)` flags.
+    """
+    is_bold = bool(flags & 16)
+    is_italic = bool(flags & 2)
+    if not raw_font:
+        return "Calibri", is_bold, is_italic
+
+    cleaned = _SUBSET_FONT_RE.sub("", raw_font).strip()
+    lower = cleaned.lower()
+    if any(k in lower for k in ("bold", "black", "heavy", "demi", "semibold")):
+        is_bold = True
+    if any(k in lower for k in ("italic", "oblique")):
+        is_italic = True
+
+    if "calibri" in lower:
+        family = "Calibri"
+    elif "arial" in lower or "helvetica" in lower:
+        family = "Arial"
+    elif "times" in lower:
+        family = "Times New Roman"
+    elif "segoe" in lower:
+        family = "Segoe UI"
+    elif "cambria" in lower:
+        family = "Cambria"
+    elif "georgia" in lower:
+        family = "Georgia"
+    elif "garamond" in lower:
+        family = "Garamond"
+    elif "verdana" in lower:
+        family = "Verdana"
+    elif "tahoma" in lower:
+        family = "Tahoma"
+    elif "consolas" in lower or "courier" in lower:
+        family = "Consolas"
+    else:
+        family = (
+            re.sub(
+                r"[-,](BoldItalic|Bold|Italic|Regular|Medium|Light|PSMT|MT).*$",
+                "",
+                cleaned,
+                flags=re.IGNORECASE,
+            )
+            or "Calibri"
+        )
+    return family, is_bold, is_italic
+
+
+def _norm_color_to_rgb(c) -> tuple[int, int, int]:
+    """Convert PDF color (int sRGB, float greyscale, or float RGB tuple) to `(R, G, B)` 0..255."""
+    if c is None:
+        return (0, 0, 0)
+    if isinstance(c, int):
+        # PyMuPDF span color is a 24-bit integer 0xRRGGBB
+        if c > 1:
+            return ((c >> 16) & 0xFF, (c >> 8) & 0xFF, c & 0xFF)
+        v = max(0, min(255, int(round(c * 255))))
+        return (v, v, v)
+    if isinstance(c, float):
+        v = max(0, min(255, int(round(c * 255))))
+        return (v, v, v)
+    if isinstance(c, (tuple, list)):
+        if len(c) == 1:
+            v = max(0, min(255, int(round(float(c[0]) * 255))))
+            return (v, v, v)
+        if len(c) >= 3:
+            if any(isinstance(x, float) and x <= 1.0 for x in c[:3]) and max(c[:3]) <= 1.0:
+                return tuple(max(0, min(255, int(round(float(x) * 255)))) for x in c[:3])
+            return tuple(max(0, min(255, int(round(float(x))))) for x in c[:3])
+    return (0, 0, 0)
+
+
+def _rgb_to_hex(rgb: tuple[int, int, int]) -> str:
+    return f"{rgb[0]:02X}{rgb[1]:02X}{rgb[2]:02X}"
+
+
+def _add_paragraph_bottom_border(p, hex_color: str, height_pt: float, space_pt: int = 2) -> None:
+    """Attach a crisp OpenXML full-width bottom border (`<w:pBdr><w:bottom .../>`) to paragraph `p`."""
+    from docx.oxml import parse_xml
+    from docx.oxml.ns import nsdecls
+
+    sz = max(4, min(18, int(round(height_pt * 8))))
+    pPr = p._p.get_or_add_pPr()
+    for existing in pPr.findall(
+        "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}pBdr"
+    ):
+        pPr.remove(existing)
+    pBdr = parse_xml(
+        f'<w:pBdr {nsdecls("w")}>'
+        f'<w:bottom w:val="single" w:sz="{sz}" w:space="{space_pt}" w:color="{hex_color}"/>'
+        f"</w:pBdr>"
+    )
+    pPr.append(pBdr)
+
+
+def _extract_page_layout_fitz(pdf_path: Path) -> list[dict]:
+    """
+    Extract exact per-page geometry, visual horizontal text lines, spans, thin
+    horizontal divider rules, link underlines, and embedded images using `PyMuPDF` (`fitz`).
+    Also detects if a page contains a multi-cell grid table.
+    """
+    import fitz
+
+    pages_data: list[dict] = []
+    with fitz.open(str(pdf_path)) as doc:
+        for page in doc:
+            pw = float(page.rect.width)
+            ph = float(page.rect.height)
+
+            hrules: list[dict] = []
+            underlines: list[dict] = []
+            v_segments = 0
+
+            # 1. Inspect vector drawings for section divider lines, underlines, and table grids
+            for d in page.get_drawings():
+                rect = d.get("rect")
+                if not rect:
+                    continue
+                rw = float(rect.width)
+                rh = float(rect.height)
+                col = _norm_color_to_rgb(d.get("fill") or d.get("color"))
+                if rh <= 3.8 and rw >= 130.0:
+                    hrules.append(
+                        {
+                            "x0": float(rect.x0),
+                            "x1": float(rect.x1),
+                            "top": float(rect.y0),
+                            "bottom": float(rect.y1),
+                            "width": rw,
+                            "height": max(0.5, rh),
+                            "hex": _rgb_to_hex(col),
+                        }
+                    )
+                elif rh <= 2.2 and 14.0 <= rw < 130.0:
+                    underlines.append(
+                        {
+                            "x0": float(rect.x0),
+                            "x1": float(rect.x1),
+                            "top": float(rect.y0),
+                            "bottom": float(rect.y1),
+                            "hex": _rgb_to_hex(col),
+                        }
+                    )
+                elif rw <= 3.0 and rh >= 18.0:
+                    v_segments += 1
+
+            # Also check PDF hyperlink annotations as underlined regions
+            for lnk in page.get_links():
+                lrect = lnk.get("from")
+                if lrect:
+                    underlines.append(
+                        {
+                            "x0": float(lrect.x0),
+                            "x1": float(lrect.x1),
+                            "top": float(lrect.y1) - 1.0,
+                            "bottom": float(lrect.y1),
+                            "hex": "1F3864",
+                        }
+                    )
+
+            # 2. Extract all text spans and cluster into visual horizontal lines by Y-midpoint
+            raw_spans: list[dict] = []
+            image_blocks: list[dict] = []
+            text_dict = page.get_text("dict")
+            for b in text_dict.get("blocks", []):
+                btype = b.get("type", 0)
+                if btype == 0:
+                    for line in b.get("lines", []):
+                        for sp in line.get("spans", []):
+                            txt = sp.get("text", "")
+                            if not txt or not txt.strip():
+                                continue
+                            bbox = sp.get("bbox", (0, 0, 0, 0))
+                            sx0, stop, sx1, sbot = (
+                                float(bbox[0]),
+                                float(bbox[1]),
+                                float(bbox[2]),
+                                float(bbox[3]),
+                            )
+                            fam, bold, italic = _clean_font_and_style(
+                                sp.get("font"), int(sp.get("flags", 0))
+                            )
+                            sz = round(float(sp.get("size", 10.0)) * 2) / 2.0
+                            rgb = _norm_color_to_rgb(sp.get("color", 0))
+                            is_ul = any(
+                                (u["x0"] - 4.0 <= (sx0 + sx1) / 2.0 <= u["x1"] + 4.0)
+                                and (abs(u["top"] - sbot) <= 4.5)
+                                for u in underlines
+                            )
+                            raw_spans.append(
+                                {
+                                    "key": (fam, sz, bold, italic, rgb, is_ul),
+                                    "x0": sx0,
+                                    "x1": sx1,
+                                    "top": stop,
+                                    "bottom": sbot,
+                                    "ymid": (stop + sbot) / 2.0,
+                                    "text": txt,
+                                }
+                            )
+                elif btype == 1 and b.get("image"):
+                    bbox = b.get("bbox", (0, 0, 100, 100))
+                    image_blocks.append(
+                        {
+                            "x0": float(bbox[0]),
+                            "top": float(bbox[1]),
+                            "x1": float(bbox[2]),
+                            "bottom": float(bbox[3]),
+                            "width": max(12.0, float(bbox[2]) - float(bbox[0])),
+                            "image": b.get("image"),
+                        }
+                    )
+
+            # Cluster spans whose vertical centers are within 3.5pt into single visual lines
+            raw_spans.sort(key=lambda s: (round(s["ymid"] / 3.0), s["x0"]))
+            visual_lines: list[list[dict]] = []
+            for sp in sorted(raw_spans, key=lambda s: s["ymid"]):
+                placed = False
+                for vline in visual_lines:
+                    avg_ymid = sum(x["ymid"] for x in vline) / len(vline)
+                    if abs(sp["ymid"] - avg_ymid) <= 3.5:
+                        vline.append(sp)
+                        placed = True
+                        break
+                if not placed:
+                    visual_lines.append([sp])
+
+            for vline in visual_lines:
+                vline.sort(key=lambda s: s["x0"])
+
+            visual_lines.sort(key=lambda vl: min(s["top"] for s in vl))
+
+            pages_data.append(
+                {
+                    "width": pw,
+                    "height": ph,
+                    "hrules": sorted(hrules, key=lambda r: r["top"]),
+                    "visual_lines": visual_lines,
+                    "images": image_blocks,
+                    "has_grid_table": v_segments >= 6,
+                }
+            )
+    return pages_data
+
+
+def _extract_page_layout_pdfplumber(pdf_path: Path) -> list[dict]:
+    """Fallback extractor using `pdfplumber` if `fitz` is not installed."""
+    import pdfplumber
+
+    pages_data: list[dict] = []
+    with pdfplumber.open(str(pdf_path)) as pdf:
+        for page in pdf.pages:
+            pw = float(page.width)
+            ph = float(page.height)
+            lines = page.extract_text_lines(
+                extra_attrs=["fontname", "size", "non_stroking_color"]
+            )
+            rects = page.rects or []
+            plines = page.lines or []
+
+            hrules: list[dict] = []
+            underlines: list[dict] = []
+            v_segments = 0
+            for r in rects + plines:
+                rw = float(r.get("width", abs(r.get("x1", 0) - r.get("x0", 0))))
+                rh = float(r.get("height", abs(r.get("bottom", 0) - r.get("top", 0))))
+                col = _norm_color_to_rgb(
+                    r.get("non_stroking_color") or r.get("stroking_color")
+                )
+                if rh <= 3.8 and rw >= 130.0:
+                    hrules.append(
+                        {
+                            "x0": float(r["x0"]),
+                            "x1": float(r["x1"]),
+                            "top": float(r["top"]),
+                            "bottom": float(r["bottom"]),
+                            "width": rw,
+                            "height": max(0.5, rh),
+                            "hex": _rgb_to_hex(col),
+                        }
+                    )
+                elif rh <= 2.2 and 14.0 <= rw < 130.0:
+                    underlines.append(
+                        {
+                            "x0": float(r["x0"]),
+                            "x1": float(r["x1"]),
+                            "top": float(r["top"]),
+                            "bottom": float(r["bottom"]),
+                            "hex": _rgb_to_hex(col),
+                        }
+                    )
+                elif rw <= 3.0 and rh >= 18.0:
+                    v_segments += 1
+
+            visual_lines: list[list[dict]] = []
+            for ln in lines:
+                chars = ln.get("chars", [])
+                if not chars:
+                    continue
+                spans: list[dict] = []
+                for ch in chars:
+                    txt = ch.get("text", "")
+                    if not txt:
+                        continue
+                    fam, bold, italic = _clean_font_and_style(ch.get("fontname"))
+                    sz = round(float(ch.get("size", 10.0)) * 2) / 2.0
+                    rgb = _norm_color_to_rgb(ch.get("non_stroking_color"))
+                    cx0, cx1 = float(ch["x0"]), float(ch["x1"])
+                    ctop, cbot = float(ch["top"]), float(ch["bottom"])
+                    is_ul = any(
+                        (u["x0"] - 3.0 <= (cx0 + cx1) / 2.0 <= u["x1"] + 3.0)
+                        and (abs(u["top"] - cbot) <= 4.0)
+                        for u in underlines
+                    )
+                    key = (fam, sz, bold, italic, rgb, is_ul)
+                    if not spans:
+                        spans.append(
+                            {
+                                "key": key,
+                                "x0": cx0,
+                                "x1": cx1,
+                                "top": ctop,
+                                "bottom": cbot,
+                                "text": txt,
+                            }
+                        )
+                    else:
+                        prev = spans[-1]
+                        gap = cx0 - prev["x1"]
+                        if (
+                            prev["text"].strip() in _BULLET_CHARS and gap > 3.0
+                        ) or gap >= 28.0:
+                            spans.append(
+                                {
+                                    "key": key,
+                                    "x0": cx0,
+                                    "x1": cx1,
+                                    "top": ctop,
+                                    "bottom": cbot,
+                                    "text": txt,
+                                }
+                            )
+                        elif prev["key"] == key:
+                            if (
+                                gap > sz * 0.18
+                                and not prev["text"].endswith(" ")
+                                and txt != " "
+                            ):
+                                prev["text"] += " "
+                            prev["text"] += txt
+                            prev["x1"] = cx1
+                        else:
+                            if (
+                                gap > sz * 0.18
+                                and not prev["text"].endswith(" ")
+                                and txt != " "
+                            ):
+                                prev["text"] += " "
+                            spans.append(
+                                {
+                                    "key": key,
+                                    "x0": cx0,
+                                    "x1": cx1,
+                                    "top": ctop,
+                                    "bottom": cbot,
+                                    "text": txt,
+                                }
+                            )
+                if spans:
+                    visual_lines.append(spans)
+
+            pages_data.append(
+                {
+                    "width": pw,
+                    "height": ph,
+                    "hrules": sorted(hrules, key=lambda r: r["top"]),
+                    "visual_lines": visual_lines,
+                    "images": [],
+                    "has_grid_table": v_segments >= 6,
+                }
+            )
+    return pages_data
+
+
+def _build_precision_docx_from_pages(
+    pages_data: list[dict],
+    out_docx: Path,
+    progress_cb: Callable[[int], None] | None = None,
+) -> None:
+    """
+    Construct a 1:1 formatted Word `.docx` from extracted PDF page layout data:
+    - Exact page width, height, and margins.
+    - Exact fonts, sizes, bold/italic/underline styles, and RGB text colors.
+    - Full-width horizontal section divider rules (`<w:pBdr><w:bottom .../>`).
+    - True hanging-indent bullet lists (`left_indent` + negative `first_line_indent` + tab stop).
+    - Multi-stop tab alignment when a line has left + right columns (e.g. Role + Date).
+    - Compensated vertical paragraph spacing so single-page documents never spill onto page 2.
+    """
+    from docx import Document
+    from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_TAB_ALIGNMENT
+    from docx.shared import Pt, RGBColor
+
+    doc = Document()
+    for p in list(doc.paragraphs):
+        p._element.getparent().remove(p._element)
+
+    total_pages = max(1, len(pages_data))
+
+    for page_idx, pinfo in enumerate(pages_data):
+        pw = pinfo["width"]
+        ph = pinfo["height"]
+        hrules = pinfo["hrules"]
+        vlines = pinfo["visual_lines"]
+
+        all_x0 = [sp["x0"] for vl in vlines for sp in vl] + [r["x0"] for r in hrules]
+        all_x1 = [sp["x1"] for vl in vlines for sp in vl] + [r["x1"] for r in hrules]
+        all_top = [sp["top"] for vl in vlines for sp in vl]
+        all_bot = [sp["bottom"] for vl in vlines for sp in vl]
+
+        left_m = max(18.0, min(all_x0) if all_x0 else 36.0)
+        right_m = max(18.0, (pw - max(all_x1)) if all_x1 else 36.0)
+        top_m = max(18.0, min(all_top) if all_top else 36.0)
+        bot_m = max(18.0, (ph - max(all_bot)) if all_bot else 36.0)
+
+        section = doc.sections[0] if page_idx == 0 else doc.add_section()
+        section.page_width = Pt(pw)
+        section.page_height = Pt(ph)
+        section.left_margin = Pt(left_m)
+        section.right_margin = Pt(right_m)
+        section.top_margin = Pt(top_m)
+        section.bottom_margin = Pt(bot_m)
+
+        body_width = max(100.0, pw - left_m - right_m)
+
+        parsed_lines: list[dict] = []
+        for vl in vlines:
+            # Merge adjacent spans with identical formatting unless separated by a bullet or large column gap
+            merged_spans: list[dict] = []
+            tab_stops_on_line: list[tuple[float, str]] = []
+
+            for sp in vl:
+                txt = sp["text"]
+                if not merged_spans:
+                    merged_spans.append(dict(sp))
+                    continue
+
+                prev = merged_spans[-1]
+                gap = sp["x0"] - prev["x1"]
+                sz = sp["key"][1]
+
+                if prev["text"].strip() in _BULLET_CHARS and gap > 2.0:
+                    merged_spans.append(dict(sp))
+                elif gap >= 28.0:
+                    # Large horizontal gap on same line -> insert tab stop for multi-column alignment
+                    prev["text"] = prev["text"].rstrip() + "\t"
+                    is_right_col = sp["x1"] >= (pw - right_m - 18.0)
+                    if is_right_col:
+                        tab_stops_on_line.append((body_width, "RIGHT"))
+                    else:
+                        tab_stops_on_line.append((max(0.0, sp["x0"] - left_m), "LEFT"))
+                    merged_spans.append(dict(sp))
+                elif prev["key"] == sp["key"]:
+                    if (
+                        gap > sz * 0.16
+                        and not prev["text"].endswith(" ")
+                        and not txt.startswith(" ")
+                    ):
+                        prev["text"] += " "
+                    prev["text"] += txt
+                    prev["x1"] = max(prev["x1"], sp["x1"])
+                else:
+                    if (
+                        gap > sz * 0.16
+                        and not prev["text"].endswith(" ")
+                        and not txt.startswith(" ")
+                    ):
+                        prev["text"] += " "
+                    merged_spans.append(dict(sp))
+
+            lx0 = min(s["x0"] for s in merged_spans)
+            lx1 = max(s["x1"] for s in merged_spans)
+            ltop = min(s["top"] for s in merged_spans)
+            lbot = max(s["bottom"] for s in merged_spans)
+
+            first_txt = merged_spans[0]["text"].strip()
+            is_bullet = first_txt in _BULLET_CHARS or (
+                len(first_txt) > 1
+                and first_txt[0] in _BULLET_CHARS
+                and first_txt[1] in (" ", "\t")
+            )
+            if is_bullet and first_txt not in _BULLET_CHARS:
+                # Split leading bullet char from text if they were in the same PDF span
+                bchar = first_txt[0]
+                rest_txt = merged_spans[0]["text"].lstrip()[1:].lstrip()
+                b_span = dict(merged_spans[0])
+                b_span["text"] = bchar
+                t_span = dict(merged_spans[0])
+                t_span["text"] = rest_txt
+                t_span["x0"] = lx0 + 13.0
+                merged_spans = [b_span, t_span] + merged_spans[1:]
+
+            bullet_text_x0 = (
+                merged_spans[1]["x0"]
+                if (is_bullet and len(merged_spans) > 1)
+                else (lx0 + 13.0 if is_bullet else lx0)
+            )
+
+            l_gap = lx0 - left_m
+            r_gap = (pw - right_m) - lx1
+            is_centered = (
+                (l_gap >= 35.0)
+                and (abs(l_gap - r_gap) <= 15.0)
+                and not is_bullet
+                and not tab_stops_on_line
+            )
+
+            parsed_lines.append(
+                {
+                    "x0": lx0,
+                    "x1": lx1,
+                    "top": ltop,
+                    "bottom": lbot,
+                    "spans": merged_spans,
+                    "is_bullet": is_bullet,
+                    "bullet_text_x0": bullet_text_x0,
+                    "is_centered": is_centered,
+                    "tab_stops": tab_stops_on_line,
+                    "max_size": max(s["key"][1] for s in merged_spans),
+                    "any_bold": any(s["key"][2] for s in merged_spans),
+                }
+            )
+
+        # Group wrapped continuation lines into natural editable paragraphs
+        paragraphs: list[dict] = []
+        used_hrules: set[int] = set()
+
+        for pl in parsed_lines:
+            if paragraphs:
+                prev_p = paragraphs[-1]
+                for hi, hr in enumerate(hrules):
+                    if (
+                        hi not in used_hrules
+                        and prev_p["bottom"] - 2.0 <= hr["top"] <= pl["top"] + 2.0
+                    ):
+                        prev_p["bottom_border"] = hr
+                        used_hrules.add(hi)
+
+                v_gap = pl["top"] - prev_p["bottom"]
+                prev_reached_right = prev_p["last_x1"] >= (left_m + body_width * 0.72)
+                same_cont_x0 = abs(pl["x0"] - prev_p["cont_x0"]) <= 4.0
+                same_font_size = abs(pl["max_size"] - prev_p["max_size"]) <= 0.6
+
+                if (
+                    "bottom_border" not in prev_p
+                    and not prev_p["is_centered"]
+                    and not pl["is_centered"]
+                    and not pl["is_bullet"]
+                    and not prev_p["tab_stops"]
+                    and not pl["tab_stops"]
+                    and not (pl["any_bold"] and not prev_p["any_bold"])
+                    and v_gap <= 3.4
+                    and prev_reached_right
+                    and same_cont_x0
+                    and same_font_size
+                ):
+                    if prev_p["spans"] and not prev_p["spans"][-1]["text"].endswith(" "):
+                        prev_p["spans"][-1]["text"] += " "
+                    prev_p["spans"].extend(pl["spans"])
+                    prev_p["bottom"] = pl["bottom"]
+                    prev_p["last_x1"] = pl["x1"]
+                    prev_p["line_count"] += 1
+                    prev_p["line_leading_sum"] += pl["top"] - prev_p["last_top"]
+                    prev_p["last_top"] = pl["top"]
+                    continue
+
+            paragraphs.append(
+                {
+                    "x0": pl["x0"],
+                    "cont_x0": pl["bullet_text_x0"] if pl["is_bullet"] else pl["x0"],
+                    "last_x1": pl["x1"],
+                    "top": pl["top"],
+                    "last_top": pl["top"],
+                    "bottom": pl["bottom"],
+                    "spans": list(pl["spans"]),
+                    "is_bullet": pl["is_bullet"],
+                    "is_centered": pl["is_centered"],
+                    "tab_stops": list(pl["tab_stops"]),
+                    "max_size": pl["max_size"],
+                    "any_bold": pl["any_bold"],
+                    "line_count": 1,
+                    "line_leading_sum": 0.0,
+                }
+            )
+
+        if paragraphs:
+            for hi, hr in enumerate(hrules):
+                if hi not in used_hrules and hr["top"] >= paragraphs[-1]["bottom"] - 2.0:
+                    paragraphs[-1]["bottom_border"] = hr
+                    used_hrules.add(hi)
+
+        # Emit Word paragraphs
+        prev_bottom = top_m
+        num_paras = max(1, len(paragraphs))
+        for pi, pdata in enumerate(paragraphs):
+            if progress_cb and pi % 4 == 0:
+                page_base = (page_idx / total_pages) * 85.0
+                page_frac = ((pi + 1) / num_paras) * (85.0 / total_pages)
+                progress_cb(min(95, int(round(10 + page_base + page_frac))))
+
+            p = doc.add_paragraph()
+            pf = p.paragraph_format
+
+            # Subtract Word's internal font leading (~0.22 * font_size) from raw bbox gap
+            # so multi-section single-page resumes/documents fit on the exact same page count
+            raw_gap = (
+                max(0.0, (pdata["top"] - prev_bottom) - (0.22 * pdata["max_size"]))
+                if pi > 0
+                else 0.0
+            )
+            pf.space_before = Pt(round(raw_gap * 2) / 2.0)
+            pf.space_after = Pt(0)
+
+            if pdata["line_count"] > 1:
+                avg_leading = pdata["line_leading_sum"] / (pdata["line_count"] - 1)
+                pf.line_spacing = Pt(round(avg_leading * 2) / 2.0)
+            else:
+                pf.line_spacing = Pt(round(pdata["max_size"] * 1.12 * 2) / 2.0)
+
+            if pdata["is_centered"]:
+                p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                pf.left_indent = Pt(0)
+                pf.right_indent = Pt(0)
+                pf.first_line_indent = Pt(0)
+            elif pdata["is_bullet"]:
+                p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+                bullet_x = max(0.0, pdata["x0"] - left_m)
+                text_x = max(bullet_x + 11.0, pdata["cont_x0"] - left_m)
+                pf.left_indent = Pt(round(text_x * 2) / 2.0)
+                pf.right_indent = Pt(0)
+                pf.first_line_indent = Pt(-round((text_x - bullet_x) * 2) / 2.0)
+                pf.tab_stops.add_tab_stop(
+                    Pt(round(text_x * 2) / 2.0), WD_TAB_ALIGNMENT.LEFT
+                )
+            else:
+                p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+                indent_x = max(0.0, pdata["x0"] - left_m)
+                pf.left_indent = (
+                    Pt(round(indent_x * 2) / 2.0) if indent_x >= 3.5 else Pt(0)
+                )
+                pf.right_indent = Pt(0)
+                pf.first_line_indent = Pt(0)
+
+            for ts_pos, ts_align in pdata["tab_stops"]:
+                align_enum = (
+                    WD_TAB_ALIGNMENT.RIGHT
+                    if ts_align == "RIGHT"
+                    else WD_TAB_ALIGNMENT.LEFT
+                )
+                pf.tab_stops.add_tab_stop(Pt(round(ts_pos * 2) / 2.0), align_enum)
+
+            if "bottom_border" in pdata:
+                hr = pdata["bottom_border"]
+                space_pt = max(1, min(6, int(round(hr["top"] - pdata["bottom"]))))
+                _add_paragraph_bottom_border(
+                    p, hr["hex"], hr["height"], space_pt=space_pt
+                )
+                prev_bottom = hr["bottom"]
+            else:
+                prev_bottom = pdata["bottom"]
+
+            for si, sp in enumerate(pdata["spans"]):
+                fam, sz, bold, italic, rgb, is_ul = sp["key"]
+                txt = sp["text"]
+                if pdata["is_bullet"] and si == 0 and txt.strip() in _BULLET_CHARS:
+                    txt = txt.strip() + "\t"
+                run = p.add_run(txt)
+                run.font.name = fam
+                run.font.size = Pt(sz)
+                run.bold = bold
+                run.italic = italic
+                run.underline = is_ul
+                run.font.color.rgb = RGBColor(rgb[0], rgb[1], rgb[2])
+
+        # Append any embedded images on the page
+        for img_item in pinfo.get("images", []):
+            try:
+                p_img = doc.add_paragraph()
+                p_img.add_run().add_picture(
+                    io.BytesIO(img_item["image"]),
+                    width=Pt(min(body_width, img_item["width"])),
+                )
+            except Exception:  # noqa: BLE001
+                pass
+
+    doc.save(str(out_docx))
+
+
+def _repair_pdf2docx_xml(docx_path: Path, pages_data: list[dict] | None = None) -> None:
+    """
+    Repair OpenXML defects in `pdf2docx` output (used when converting complex grid tables):
+    1. Unwraps invalid `<w:r><w:hyperlink>...</w:hyperlink></w:r>` so links are visible.
+    2. Strips artificial right indents (`w:right`) on paragraphs so short lines don't wrap.
+    3. Zeroes `w:left`/`w:right` on centered paragraphs and fixes false-centered bullets.
+    4. Strips 6-letter PDF subset font prefixes (`BCDEEE+Calibri` -> `Calibri`).
+    """
+    try:
+        from docx import Document
+        from docx.enum.text import WD_ALIGN_PARAGRAPH
+        from docx.shared import Pt
+
+        doc = Document(str(docx_path))
+        W_NS = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+
+        for p in doc.paragraphs:
+            # 1. Unwrap nested <w:hyperlink> inside <w:r>
+            for r_elem in list(p._p.findall(f"{W_NS}r")):
+                hl_elem = r_elem.find(f"{W_NS}hyperlink")
+                if hl_elem is not None:
+                    outer_rPr = r_elem.find(f"{W_NS}rPr")
+                    for inner_r in hl_elem.findall(f"{W_NS}r"):
+                        if outer_rPr is not None:
+                            inner_rPr = inner_r.find(f"{W_NS}rPr")
+                            if inner_rPr is not None:
+                                inner_r.remove(inner_rPr)
+                            inner_r.insert(0, deepcopy(outer_rPr))
+                    idx = list(p._p).index(r_elem)
+                    p._p.insert(idx, hl_elem)
+                    p._p.remove(r_elem)
+
+            # 2. Fix indents and false centering
+            pf = p.paragraph_format
+            txt_stripped = p.text.strip()
+            if txt_stripped and txt_stripped[0] in _BULLET_CHARS:
+                if p.alignment == WD_ALIGN_PARAGRAPH.CENTER:
+                    p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+            elif p.alignment == WD_ALIGN_PARAGRAPH.CENTER:
+                pf.left_indent = Pt(0)
+                pf.right_indent = Pt(0)
+                pf.first_line_indent = Pt(0)
+
+            if pf.right_indent is not None and pf.right_indent > Pt(12):
+                pf.right_indent = Pt(0)
+
+            for run in p.runs:
+                if run.font and run.font.name and _SUBSET_FONT_RE.match(run.font.name):
+                    run.font.name = _SUBSET_FONT_RE.sub("", run.font.name)
+
+        doc.save(str(docx_path))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+class _Pdf2DocxProgressHandler(logging.Handler):
+    """Intercepts `pdf2docx` log messages and translates them into `0% - 100%` callbacks."""
+
+    def __init__(self, total_pages: int, progress_cb: Callable[[int], None] | None) -> None:
+        super().__init__()
+        self.total_pages = max(1, total_pages)
+        self.progress_cb = progress_cb
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if self.progress_cb is None:
+            return
+        try:
+            msg = record.getMessage()
+            match = _PDF2DOCX_STAGE_RE.search(msg)
+            if match:
+                stage = int(match.group(1))
+                page_num = int(match.group(2))
+                stage_weights = {1: 0.05, 2: 0.30, 3: 0.65, 4: 0.88}
+                base = stage_weights.get(stage, 0.5)
+                span = 0.22 / self.total_pages
+                frac = base + min(self.total_pages, page_num) * span
+                pct = max(8, min(95, int(round(frac * 100))))
+                self.progress_cb(pct)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def convert_pdf_to_word_docx(
+    source_pdf: Path,
+    replace_original: bool = False,
+    progress_cb: Callable[[int], None] | None = None,
+) -> Path:
+    """
+    Convert `source_pdf` (.pdf) into a 1:1 formatted, editable Word `.docx`:
+    - Uses the ultra-fast Precision Layout Engine (`_extract_page_layout_fitz` /
+      `_extract_page_layout_pdfplumber` + `_build_precision_docx_from_pages`) for
+      text-based PDFs (resumes, letters, reports, documentation) to preserve exact
+      fonts, colors, centered headers, hyperlinks, full-width horizontal divider
+      lines, hanging-indent bullets, and single-page vertical spacing in ~0.2s.
+    - Automatically routes pages with multi-cell grid tables through `pdf2docx` +
+      OpenXML repair (`_repair_pdf2docx_xml`).
+    """
+    out_docx = _unique_output_path(source_pdf.parent, source_pdf.stem, ".docx")
+    conversion_succeeded = False
+    last_error = ""
+
+    if sys.stdout is None:
+        sys.stdout = io.StringIO()
+    if sys.stderr is None:
+        sys.stderr = io.StringIO()
+
+    if progress_cb:
+        progress_cb(8)
+
+    # Extract page layout geometry (via PyMuPDF fitz or pdfplumber)
+    pages_data: list[dict] = []
+    try:
+        pages_data = _extract_page_layout_fitz(source_pdf)
+    except Exception:  # noqa: BLE001
+        try:
+            pages_data = _extract_page_layout_pdfplumber(source_pdf)
+        except Exception as exc:  # noqa: BLE001
+            last_error = str(exc)
+
+    has_any_text = any(bool(p.get("visual_lines")) for p in pages_data)
+    has_grid_table = any(bool(p.get("has_grid_table")) for p in pages_data)
+
+    # Path A: Fast 1:1 Precision Reconstruction for Resumes & Text/Image PDFs
+    if has_any_text and not has_grid_table:
+        try:
+            if progress_cb:
+                progress_cb(25)
+            _build_precision_docx_from_pages(
+                pages_data=pages_data,
+                out_docx=out_docx,
+                progress_cb=progress_cb,
+            )
+            if out_docx.exists() and out_docx.stat().st_size > 0:
+                conversion_succeeded = True
+        except Exception as exc:  # noqa: BLE001
+            last_error = str(exc)
+
+    # Path B: Grid-Table PDFs or Fallback -> `pdf2docx` + OpenXML Repair
+    if not conversion_succeeded:
+        try:
+            from pdf2docx import Converter
+
+            total_pages = max(1, len(pages_data))
+            handler = _Pdf2DocxProgressHandler(total_pages, progress_cb)
+            root_logger = logging.getLogger()
+            p2d_logger = logging.getLogger("pdf2docx")
+            root_logger.addHandler(handler)
+            p2d_logger.addHandler(handler)
+            try:
+                cv = Converter(str(source_pdf))
+                try:
+                    cv.convert(
+                        str(out_docx),
+                        start=0,
+                        end=None,
+                        multi_processing=False,
+                        delete_end_line_hyphen=False,
+                    )
+                finally:
+                    cv.close()
+            finally:
+                root_logger.removeHandler(handler)
+                p2d_logger.removeHandler(handler)
+
+            if out_docx.exists() and out_docx.stat().st_size > 0:
+                if progress_cb:
+                    progress_cb(94)
+                _repair_pdf2docx_xml(out_docx, pages_data)
+                conversion_succeeded = True
+        except Exception as exc:  # noqa: BLE001
+            last_error = last_error or str(exc)
+
+    # Path C: Fallback to Precision Builder even if grid-table flag was set
+    if not conversion_succeeded and has_any_text:
+        try:
+            _build_precision_docx_from_pages(
+                pages_data=pages_data,
+                out_docx=out_docx,
+                progress_cb=progress_cb,
+            )
+            if out_docx.exists() and out_docx.stat().st_size > 0:
+                conversion_succeeded = True
+        except Exception as exc:  # noqa: BLE001
+            last_error = last_error or str(exc)
+
+    if not conversion_succeeded or not out_docx.exists():
+        raise RuntimeError(
+            last_error or "Install PyMuPDF & python-docx (`pip install PyMuPDF python-docx`)."
+        )
+
+    if progress_cb:
+        progress_cb(100)
+
+    if replace_original and source_pdf.exists() and source_pdf.resolve() != out_docx.resolve():
+        try:
+            source_pdf.unlink()
+        except OSError:
+            pass
+
+    return out_docx
+
+
+def convert_word_to_pdf_file(
+    source_word: Path,
+    replace_original: bool = False,
+    progress_cb: Callable[[int], None] | None = None,
+) -> Path:
+    """
+    Convert `source_word` (.docx / .doc) into a clean, print-ready `.pdf`
+    using 100% background-thread-safe engines with live percentage progress:
+    - Tier 1: Microsoft Word native PDF export (`ExportAsFixedFormat($dst, 17)` in `-STA`).
+    - Tier 2: Pure-Python thread-safe `python-docx` + `PyMuPDF` (`fitz`) multi-page A4 renderer.
+    """
+    out_pdf = _unique_output_path(source_word.parent, source_word.stem, ".pdf")
+    conversion_succeeded = False
+    last_error = ""
+
+    if progress_cb:
+        progress_cb(15)
+
+    if sys.platform == "win32":
+        try:
+            if progress_cb:
+                progress_cb(35)
+            src_escaped = str(source_word.resolve()).replace("'", "''")
+            dst_escaped = str(out_pdf.resolve()).replace("'", "''")
+            ps_script = (
+                "$ErrorActionPreference = 'Stop'; "
+                "$word = New-Object -ComObject Word.Application; "
+                "$word.Visible = $false; "
+                "$word.DisplayAlerts = 0; "
+                "try { "
+                f"  $doc = $word.Documents.Open('{src_escaped}', $false, $true); "
+                f"  $doc.ExportAsFixedFormat('{dst_escaped}', 17); "
+                "  $doc.Close($false); "
+                "} finally { "
+                "  $word.Quit(); "
+                "}"
+            )
+            subprocess.run(
+                ["powershell", "-NoProfile", "-NonInteractive", "-STA", "-Command", ps_script],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=90,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000),
+            )
+            if out_pdf.exists() and out_pdf.stat().st_size > 0:
+                conversion_succeeded = True
+        except Exception as exc:  # noqa: BLE001
+            last_error = str(exc)
+
+    if not conversion_succeeded:
+        try:
+            import fitz
+            from docx import Document
+
+            if progress_cb:
+                progress_cb(50)
+
+            doc = Document(str(source_word))
+            html_parts = [
+                "<html><head><style>"
+                "body { font-family: sans-serif; font-size: 11pt; color: #0F172A; line-height: 1.45; }"
+                "h1 { font-size: 18pt; font-weight: bold; margin-top: 10pt; margin-bottom: 6pt; }"
+                "h2 { font-size: 14pt; font-weight: bold; margin-top: 8pt; margin-bottom: 5pt; }"
+                "h3 { font-size: 12pt; font-weight: bold; margin-top: 6pt; margin-bottom: 4pt; }"
+                "p { margin-top: 0pt; margin-bottom: 6pt; }"
+                "table { border-collapse: collapse; width: 100%; margin-top: 6pt; margin-bottom: 6pt; }"
+                "td, th { border: 1px solid #64748B; padding: 4pt 6pt; font-size: 10pt; }"
+                "</style></head><body>"
+            ]
+
+            for para in doc.paragraphs:
+                style_name = (para.style.name if para.style else "").lower()
+                tag = "p"
+                if "heading 1" in style_name or style_name == "title":
+                    tag = "h1"
+                elif "heading 2" in style_name:
+                    tag = "h2"
+                elif "heading 3" in style_name:
+                    tag = "h3"
+
+                run_fragments: list[str] = []
+                for run in para.runs:
+                    txt = html.escape(run.text).replace("\n", "<br/>")
+                    if not txt:
+                        continue
+                    if run.bold:
+                        txt = f"<b>{txt}</b>"
+                    if run.italic:
+                        txt = f"<i>{txt}</i>"
+                    if run.underline:
+                        txt = f"<u>{txt}</u>"
+                    run_fragments.append(txt)
+
+                inner_html = "".join(run_fragments) if run_fragments else html.escape(para.text)
+                if inner_html.strip():
+                    html_parts.append(f"<{tag}>{inner_html}</{tag}>")
+
+            for table in doc.tables:
+                html_parts.append("<table>")
+                for row in table.rows:
+                    html_parts.append("<tr>")
+                    for cell in row.cells:
+                        cell_txt = "<br/>".join(
+                            html.escape(p.text) for p in cell.paragraphs if p.text.strip()
+                        )
+                        html_parts.append(f"<td>{cell_txt}</td>")
+                    html_parts.append("</tr>")
+                html_parts.append("</table>")
+
+            html_parts.append("</body></html>")
+            full_html = "".join(html_parts)
+
+            if progress_cb:
+                progress_cb(80)
+
+            a4_w, a4_h = 595.28, 841.89
+            margin_pt = 42.52
+            content_rect = fitz.Rect(margin_pt, margin_pt, a4_w - margin_pt, a4_h - margin_pt)
+
+            if hasattr(fitz, "Story"):
+                story = fitz.Story(html=full_html)
+                writer = fitz.DocumentWriter(str(out_pdf))
+                mediabox = fitz.Rect(0, 0, a4_w, a4_h)
+                more = 1
+                while more:
+                    device = writer.begin_page(mediabox)
+                    more, _ = story.place(content_rect)
+                    story.draw(device)
+                    writer.end_page()
+                writer.close()
+            else:
+                pdf_out = fitz.open()
+                page = pdf_out.new_page(width=a4_w, height=a4_h)
+                page.insert_htmlbox(content_rect, full_html)
+                pdf_out.save(str(out_pdf))
+                pdf_out.close()
+
+            if out_pdf.exists() and out_pdf.stat().st_size > 0:
+                conversion_succeeded = True
+        except Exception as exc:  # noqa: BLE001
+            last_error = last_error or str(exc)
+
+    if not conversion_succeeded or not out_pdf.exists():
+        raise RuntimeError(last_error or "Could not convert Word document to PDF.")
+
+    if progress_cb:
+        progress_cb(100)
+
+    if replace_original and source_word.exists() and source_word.resolve() != out_pdf.resolve():
+        try:
+            source_word.unlink()
+        except OSError:
+            pass
+
+    return out_pdf
+
+
+def convert_pdf_to_images(
+    source_pdf: Path,
+    target_ext: str,
+    pil_format: str,
+    quality: int = 85,
+    scale_preset: str = "Original",
+    replace_original: bool = False,
+    progress_cb: Callable[[int], None] | None = None,
+) -> list[Path]:
+    """Render `.pdf` pages to image files (`.jpg`, `.png`, `.webp`, etc.) if dropped on an image tile."""
+    import fitz
+
+    dpi = int(get_a4_pdf_dpi(scale_preset))
+    pdf_doc = fitz.open(str(source_pdf))
+    outputs: list[Path] = []
+    try:
+        total_pages = max(1, len(pdf_doc))
+        for idx in range(total_pages):
+            if progress_cb:
+                progress_cb(int(round(((idx + 0.5) / total_pages) * 95)))
+            page = pdf_doc[idx]
+            pix = page.get_pixmap(dpi=dpi, alpha=False)
+            img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+            stem = source_pdf.stem if total_pages == 1 else f"{source_pdf.stem}_page{idx + 1}"
+            out_path = _unique_output_path(source_pdf.parent, stem, target_ext)
+            convert_pil_image_to_path(
+                img=img,
+                output_path=out_path,
+                pil_format=pil_format,
+                quality=quality,
+                scale_preset="Original",
+            )
+            outputs.append(out_path)
+    finally:
+        pdf_doc.close()
+
+    if progress_cb:
+        progress_cb(100)
+
+    if replace_original and outputs and source_pdf.exists():
+        try:
+            source_pdf.unlink()
+        except OSError:
+            pass
+    return outputs
+
+
+def convert_image_to_word_docx(
+    source_img: Path,
+    scale_preset: str = "Original",
+    replace_original: bool = False,
+) -> Path:
+    """Embed an image cleanly inside an editable A4 Word `.docx` if dropped onto `WORD`."""
+    from docx import Document
+    from docx.shared import Inches
+
+    out_docx = _unique_output_path(source_img.parent, source_img.stem, ".docx")
+    doc = Document()
+    for section in doc.sections:
+        section.top_margin = Inches(0.6)
+        section.bottom_margin = Inches(0.6)
+        section.left_margin = Inches(0.6)
+        section.right_margin = Inches(0.6)
+
+    with Image.open(source_img) as img:
+        transposed = ImageOps.exif_transpose(img)
+        scaled = apply_resolution_preset(transposed, scale_preset)
+        rgb = flatten_to_rgb(scaled)
+        buf = io.BytesIO()
+        rgb.save(buf, format="PNG")
+        buf.seek(0)
+        doc.add_picture(buf, width=Inches(6.0))
+
+    doc.save(str(out_docx))
+    if replace_original and source_img.exists() and source_img.resolve() != out_docx.resolve():
+        try:
+            source_img.unlink()
+        except OSError:
+            pass
+    return out_docx
+
+
+# ----------------------------------------------------------------------
+# Image Conversion Helpers
+# ----------------------------------------------------------------------
 def convert_pil_image_to_path(
     img: Image.Image,
     output_path: Path,
@@ -623,6 +1799,7 @@ def convert_images_to_merged_pdf(
     quality: int = 85,
     scale_preset: str = "Original",
     replace_original: bool = False,
+    progress_cb: Callable[[int], None] | None = None,
 ) -> Path:
     """
     Combine 2 or more images (including .HEIC) into a single multi-page ISO A4 PDF.
@@ -635,13 +1812,18 @@ def convert_images_to_merged_pdf(
 
     a4_pages: list[Image.Image] = []
     target_dpi = get_a4_pdf_dpi(scale_preset)
+    total = max(1, len(source_paths))
     try:
-        for src in source_paths:
+        for idx, src in enumerate(source_paths):
+            if progress_cb:
+                progress_cb(int(round(((idx + 0.5) / total) * 85)))
             with Image.open(src) as img:
                 page, dpi = compose_a4_pdf_page(img, scale_preset=scale_preset)
                 target_dpi = dpi
                 a4_pages.append(page)
 
+        if progress_cb:
+            progress_cb(94)
         a4_pages[0].save(
             out_path,
             format="PDF",
@@ -650,6 +1832,8 @@ def convert_images_to_merged_pdf(
             resolution=target_dpi,
             quality=max(5, min(100, quality)),
         )
+        if progress_cb:
+            progress_cb(100)
     finally:
         for page in a4_pages:
             page.close()
@@ -665,6 +1849,145 @@ def convert_images_to_merged_pdf(
     return out_path
 
 
+# ----------------------------------------------------------------------
+# Unified Background Worker Thread with Real-Time Percentage Progress
+# ----------------------------------------------------------------------
+class ConversionWorkerThread(QThread):
+    """
+    Executes image, PDF-to-Word, and Word-to-PDF conversions on a background
+    thread while emitting real-time percentage progress (`0% – 100%`).
+    """
+
+    progress_updated = pyqtSignal(int)
+    batch_finished = pyqtSignal(list, list, str, int, int)
+
+    def __init__(
+        self,
+        files: list[Path],
+        target_idx: int,
+        quality: int,
+        scale_preset: str,
+        replace_original: bool,
+        merge_pdf_enabled: bool,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.files = files
+        self.target_idx = target_idx
+        self.quality = quality
+        self.scale_preset = scale_preset
+        self.replace_original = replace_original
+        self.merge_pdf_enabled = merge_pdf_enabled
+
+    def run(self) -> None:
+        label, target_ext, pil_format, _ = RADIAL_FORMATS[self.target_idx]
+        orig_bytes = sum(f.stat().st_size for f in self.files if f.exists())
+        converted_paths: list[Path] = []
+        errors: list[str] = []
+
+        self.progress_updated.emit(5)
+
+        image_files = [f for f in self.files if f.suffix.lower() in IMAGE_INPUT_EXTS]
+        pdf_files = [f for f in self.files if f.suffix.lower() in PDF_INPUT_EXTS]
+        word_files = [f for f in self.files if f.suffix.lower() in WORD_INPUT_EXTS]
+
+        # Case 1: Multiple images dropped onto PDF -> Merged Multi-Page A4 PDF
+        if (
+            pil_format == "PDF"
+            and len(image_files) >= 2
+            and not pdf_files
+            and not word_files
+            and self.merge_pdf_enabled
+        ):
+            try:
+                merged_out = convert_images_to_merged_pdf(
+                    source_paths=image_files,
+                    quality=self.quality,
+                    scale_preset=self.scale_preset,
+                    replace_original=self.replace_original,
+                    progress_cb=self.progress_updated.emit,
+                )
+                converted_paths.append(merged_out)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(str(exc))
+            self.batch_finished.emit(
+                converted_paths, errors, f"{len(image_files)} A4 PAGES", orig_bytes, self.target_idx
+            )
+            return
+
+        # Case 2: Process each file with per-file and intra-file percentage reporting
+        total_files = max(1, len(self.files))
+        for file_idx, file_path in enumerate(self.files):
+            ext = file_path.suffix.lower()
+
+            def _scaled_progress(sub_pct: int, idx: int = file_idx) -> None:
+                overall = int(round(((idx + (sub_pct / 100.0)) / total_files) * 100))
+                self.progress_updated.emit(max(5, min(99, overall)))
+
+            try:
+                if ext in PDF_INPUT_EXTS:
+                    if pil_format in {"DOCX", "PDF"}:
+                        out_path = convert_pdf_to_word_docx(
+                            source_pdf=file_path,
+                            replace_original=self.replace_original,
+                            progress_cb=_scaled_progress,
+                        )
+                        converted_paths.append(out_path)
+                        label = "WORD"
+                    else:
+                        out_imgs = convert_pdf_to_images(
+                            source_pdf=file_path,
+                            target_ext=target_ext,
+                            pil_format=pil_format,
+                            quality=self.quality,
+                            scale_preset=self.scale_preset,
+                            replace_original=self.replace_original,
+                            progress_cb=_scaled_progress,
+                        )
+                        converted_paths.extend(out_imgs)
+                elif ext in WORD_INPUT_EXTS:
+                    if pil_format in {"PDF", "DOCX"}:
+                        out_path = convert_word_to_pdf_file(
+                            source_word=file_path,
+                            replace_original=self.replace_original,
+                            progress_cb=_scaled_progress,
+                        )
+                        converted_paths.append(out_path)
+                        label = "PDF"
+                    else:
+                        errors.append("Drop Word files on PDF")
+                elif ext in IMAGE_INPUT_EXTS:
+                    _scaled_progress(35)
+                    if pil_format == "DOCX":
+                        out_path = convert_image_to_word_docx(
+                            source_img=file_path,
+                            scale_preset=self.scale_preset,
+                            replace_original=self.replace_original,
+                        )
+                        converted_paths.append(out_path)
+                    else:
+                        out_path = convert_single_image(
+                            source_path=file_path,
+                            target_ext=target_ext,
+                            pil_format=pil_format,
+                            quality=self.quality,
+                            scale_preset=self.scale_preset,
+                            replace_original=self.replace_original,
+                        )
+                        converted_paths.append(out_path)
+                    _scaled_progress(100)
+                else:
+                    errors.append(f"Unsupported: {file_path.name}")
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"{file_path.name}: {exc}")
+
+        self.progress_updated.emit(100)
+        self.batch_finished.emit(converted_paths, errors, label, orig_bytes, self.target_idx)
+
+
+# ----------------------------------------------------------------------
+# Main Circular Neon Radial UI (Images + PDF ⇄ Word All-in-One)
+# ----------------------------------------------------------------------
 class RadialImageConverter(QWidget):
     """
     Circular frameless floating desktop UI that:
@@ -672,11 +1995,11 @@ class RadialImageConverter(QWidget):
        you manually enable it (Ctrl + Alt + C) and automatically deactivates
        after 5 minutes of inactivity.
     2. Uses an imperceptible (alpha=2/255) OLE drop-target surface under the cursor
-       when Armed so Windows `DoDragDrop` delivers `dragEnterEvent` immediately and
-       the UI ONLY appears when you drag a supported image file format (staying
-       completely hidden for unsupported files or empty selection drags).
-    3. Supports Option 1 (Center Well "Hold & Tweak") and Option 3 (Mid-Drag
-       SPACE / UP / DOWN shortcuts).
+       when Armed so the UI ONLY appears when you drag a supported image, PDF, or
+       Word file (staying completely hidden for unsupported files or selection boxes).
+    3. Integrates `WORD` and `PDF` right alongside `ICO`, `GIF`, `WEBP`, `JPG`, `PNG`
+       and displays a rotating circular neon loading indicator with a live
+       numbered percentage (`0% – 100%`) during conversion.
     """
 
     WINDOW_SIZE = 460
@@ -685,13 +2008,13 @@ class RadialImageConverter(QWidget):
     RING_RADIUS = 152.0
     INNER_BEZEL_OUTER = 102.0
     INNER_WELL_RADIUS = 82.0
-    TILE_SIZE = 64.0
+    TILE_SIZE = 60.0
 
     # Bottom quality arc angles (screen degrees: 0=Right, 90=Bottom, 180=Left)
     ARC_START_DEG = 114.0  # 0% / min end (bottom-left)
     ARC_END_DEG = 18.0     # 100% / max end (bottom-right)
 
-    # Drag threshold so normal single-clicks / selecting an image never triggers the UI
+    # Drag threshold so normal single-clicks / selecting a file never triggers the UI
     DRAG_MIN_DISTANCE_PX = 45.0
     DRAG_MIN_HOLD_SECONDS = 0.18
     PROBE_MAX_MOVE_TICKS = 10
@@ -713,6 +2036,15 @@ class RadialImageConverter(QWidget):
         self._staged_files: list[Path] = []
         self._is_dragging_over_center: bool = False
         self._conversion_just_finished: bool = False
+
+        # Background conversion & numbered percentage circular loading spinner state
+        self.is_converting: bool = False
+        self._spinner_angle: int = 0
+        self._conversion_progress_pct: int = 0
+        self._target_progress_pct: int = 0
+        self._loading_title: str = ""
+        self._loading_subtitle: str = ""
+        self._worker: ConversionWorkerThread | None = None
 
         # Mouse drag & imperceptible OLE format probe state
         self._mouse_was_down: bool = False
@@ -751,6 +2083,12 @@ class RadialImageConverter(QWidget):
         self._auto_hide_timer.setSingleShot(True)
         self._auto_hide_timer.timeout.connect(self._auto_hide_after_drag)
 
+        # Smooth 30ms circular loading spinner + percentage counter timer
+        self._spinner_timer = QTimer(self)
+        self._spinner_timer.setInterval(30)
+        self._spinner_timer.timeout.connect(self._tick_loading_spinner)
+        self._spinner_tick_count: int = 0
+
         # 5-minute auto-deactivation timer when Armed
         self._inactivity_timer = QTimer(self)
         self._inactivity_timer.setSingleShot(True)
@@ -773,6 +2111,23 @@ class RadialImageConverter(QWidget):
     def has_staged_files(self) -> bool:
         return len(self._staged_files) > 0
 
+    def _on_worker_progress(self, pct: int) -> None:
+        self._target_progress_pct = max(self._target_progress_pct, min(100, pct))
+        if self._conversion_progress_pct < self._target_progress_pct:
+            self._conversion_progress_pct = self._target_progress_pct
+        self.update()
+
+    def _tick_loading_spinner(self) -> None:
+        self._spinner_angle = (self._spinner_angle - 12) % 360
+        self._spinner_tick_count += 1
+        if self._conversion_progress_pct < self._target_progress_pct:
+            self._conversion_progress_pct = min(
+                self._target_progress_pct, self._conversion_progress_pct + 2
+            )
+        elif self._spinner_tick_count % 3 == 0 and self._conversion_progress_pct < 94:
+            self._conversion_progress_pct += 1
+        self.update()
+
     def _configure_window(self) -> None:
         self.setWindowTitle("FloatConvert")
         self.setWindowFlags(
@@ -784,7 +2139,6 @@ class RadialImageConverter(QWidget):
         self.setAcceptDrops(True)
         self.setMouseTracking(True)
         self.setFixedSize(self.WINDOW_SIZE, self.WINDOW_SIZE)
-        # Initialize at 0.0 opacity before show() is ever called so it never flashes on boot
         self.setWindowOpacity(0.0)
 
     def _position_center(self) -> None:
@@ -818,7 +2172,7 @@ class RadialImageConverter(QWidget):
 
     def _on_inactivity_timeout(self) -> None:
         """Automatically deactivate Smart Drag Mode after 5 minutes of inactivity."""
-        if self.is_armed:
+        if self.is_armed and not self.is_converting:
             self.disable_armed_mode()
 
     def _set_win32_click_through(self, click_through: bool) -> None:
@@ -938,6 +2292,8 @@ class RadialImageConverter(QWidget):
         return is_down and not was_down
 
     def _poll_mid_drag_shortcuts(self, user32) -> None:
+        if self.is_converting:
+            return
         VK_SPACE = 0x20
         VK_UP = 0x26
         VK_DOWN = 0x28
@@ -957,7 +2313,7 @@ class RadialImageConverter(QWidget):
             self.update()
 
     def _poll_mouse_drag_state(self) -> None:
-        if sys.platform != "win32" or not self.is_armed:
+        if sys.platform != "win32" or not self.is_armed or self.is_converting:
             return
         try:
             import ctypes
@@ -1003,7 +2359,6 @@ class RadialImageConverter(QWidget):
                                     cur_pos.y() - self.height() // 2,
                                 )
                             if self._probe_move_ticks > self.PROBE_MAX_MOVE_TICKS:
-                                # Moved across >10 ticks without OLE dragEnterEvent (e.g. selection box)
                                 self._drag_rejected_unsupported = True
                                 self._abort_invisible_drag_probe()
             elif not lbutton_down and self._mouse_was_down:
@@ -1017,6 +2372,7 @@ class RadialImageConverter(QWidget):
                     and not self._manual_pin_visible
                     and not self.has_staged_files
                     and not self._conversion_just_finished
+                    and not self.is_converting
                 ):
                     self._auto_hide_timer.start(350)
         except Exception:  # noqa: BLE001
@@ -1028,6 +2384,7 @@ class RadialImageConverter(QWidget):
             and not self.has_staged_files
             and not self._conversion_just_finished
             and not self._mouse_was_down
+            and not self.is_converting
         ):
             self._set_wheel_visible(False)
 
@@ -1091,7 +2448,8 @@ class RadialImageConverter(QWidget):
         self._manual_pin_visible = False
         self._drag_rejected_unsupported = False
         self._is_probing_drag = False
-        self._set_wheel_visible(False, force=True)
+        if not self.is_converting:
+            self._set_wheel_visible(False, force=True)
         if not self._drag_watch_timer.isActive():
             self._drag_watch_timer.start()
         self._reset_inactivity_timer()
@@ -1105,11 +2463,12 @@ class RadialImageConverter(QWidget):
         self._drag_rejected_unsupported = False
         self._inactivity_timer.stop()
         self._drag_watch_timer.stop()
-        self._set_wheel_visible(False, force=True)
+        if not self.is_converting:
+            self._set_wheel_visible(False, force=True)
         self._update_tray_status()
 
     def toggle_manual_pin_wheel(self) -> None:
-        if self._wheel_shown and self._manual_pin_visible:
+        if self._wheel_shown and self._manual_pin_visible and not self.is_converting:
             self._manual_pin_visible = False
             self._set_wheel_visible(False, force=True)
         else:
@@ -1147,7 +2506,7 @@ class RadialImageConverter(QWidget):
         self._status_subtext = ""
         if self._conversion_just_finished:
             self._conversion_just_finished = False
-            if not self._manual_pin_visible and not self.has_staged_files:
+            if not self._manual_pin_visible and not self.has_staged_files and not self.is_converting:
                 self._set_wheel_visible(False, force=True)
                 return
         self.update()
@@ -1219,7 +2578,7 @@ class RadialImageConverter(QWidget):
 
     def _hit_test_tile(self, pos: QPointF, snap_nearest: bool = False) -> int | None:
         for idx in range(len(RADIAL_FORMATS)):
-            rect = self._tile_rect(idx).adjusted(-8, -8, 8, 8)
+            rect = self._tile_rect(idx).adjusted(-6, -6, 6, 6)
             if rect.contains(pos):
                 return idx
 
@@ -1229,7 +2588,7 @@ class RadialImageConverter(QWidget):
             dist = math.hypot(dx, dy)
             if (self.INNER_BEZEL_OUTER - 4.0) < dist <= self.OUTER_RADIUS + 18.0:
                 best_idx = None
-                best_dist = 95.0
+                best_dist = 88.0
                 for idx, (_, _, _, angle_deg) in enumerate(RADIAL_FORMATS):
                     tc = self._tile_center(angle_deg)
                     d = math.hypot(pos.x() - tc.x(), pos.y() - tc.y())
@@ -1271,7 +2630,7 @@ class RadialImageConverter(QWidget):
         self.update()
 
     # ------------------------------------------------------------------
-    # Custom Neon Radial Painting
+    # Custom Neon Radial Painting + Numbered Percentage Loading Ring
     # ------------------------------------------------------------------
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
@@ -1322,12 +2681,12 @@ class RadialImageConverter(QWidget):
         painter.drawEllipse(center_pt, self.OUTER_RADIUS - 2.5, self.OUTER_RADIUS - 2.5)
 
         # 3. Recessed Central Torus Bezel & Clean Dark Center Well
-        center_active = self._is_dragging_over_center or self.has_staged_files
+        center_active = self._is_dragging_over_center or self.has_staged_files or self.is_converting
         bezel_glow = QRadialGradient(center_pt, self.INNER_BEZEL_OUTER + 12)
         bezel_glow.setColorAt(0.60, QColor(0, 0, 0, 0))
         bezel_glow.setColorAt(
             0.86,
-            QColor(56, 189, 248, 160) if center_active else QColor(139, 92, 246, 85),
+            QColor(56, 189, 248, 175) if center_active else QColor(139, 92, 246, 85),
         )
         bezel_glow.setColorAt(1.0, QColor(56, 189, 248, 0))
         painter.setPen(Qt.PenStyle.NoPen)
@@ -1372,11 +2731,11 @@ class RadialImageConverter(QWidget):
         # 4. Draw Curved Quality Dial & Arc Track at Bottom
         self._draw_quality_arc_and_dial(painter, center_pt)
 
-        # 5. Draw Each Radial Format Button
+        # 5. Draw Each Radial Format Button (ICO, GIF, WEBP, JPG, PNG, PDF, WORD)
         for idx in range(len(RADIAL_FORMATS)):
             self._draw_format_tile(painter, idx)
 
-        # 6. Draw Close Button, Quick Scale Preset Pill & Staged/Status Readout
+        # 6. Draw Close Button, Quick Scale Preset Pill, Numbered % Loading Spinner & Status Readout
         self._draw_center_overlay(painter, center_pt)
 
     def _draw_format_tile(self, painter: QPainter, idx: int) -> None:
@@ -1423,7 +2782,7 @@ class RadialImageConverter(QWidget):
 
         painter.setBrush(base_grad)
         painter.setPen(rim_pen)
-        painter.drawRoundedRect(base_rect, 16.0, 16.0)
+        painter.drawRoundedRect(base_rect, 15.0, 15.0)
 
         # C. Main 3D Glass Tile Body
         y_shift = -2.0 if is_highlighted else 0.0
@@ -1442,10 +2801,10 @@ class RadialImageConverter(QWidget):
 
         painter.setBrush(body_grad)
         painter.setPen(body_border)
-        painter.drawRoundedRect(body_rect, 14.0, 14.0)
+        painter.drawRoundedRect(body_rect, 13.0, 13.0)
 
         # D. Inner Beveled Cap
-        inner_rect = body_rect.adjusted(5.5, 5.5, -5.5, -5.5)
+        inner_rect = body_rect.adjusted(5.0, 5.0, -5.0, -5.0)
         inner_grad = QLinearGradient(inner_rect.topLeft(), inner_rect.bottomRight())
         if is_highlighted:
             inner_grad.setColorAt(0.0, QColor(147, 51, 234, 220))
@@ -1458,12 +2817,13 @@ class RadialImageConverter(QWidget):
 
         painter.setBrush(inner_grad)
         painter.setPen(inner_pen)
-        painter.drawRoundedRect(inner_rect, 10.0, 10.0)
+        painter.drawRoundedRect(inner_rect, 9.0, 9.0)
 
         # E. Crisp Format Label
-        font = QFont("Segoe UI", 11)
+        font_pt = 9 if len(label) >= 4 else 11
+        font = QFont("Segoe UI", font_pt)
         font.setBold(True)
-        font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 0.8)
+        font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 0.6)
         painter.setFont(font)
 
         display_label = f"🔒{label}" if (not self.is_pro and label in PRO_ONLY_FORMATS) else label
@@ -1592,8 +2952,99 @@ class RadialImageConverter(QWidget):
 
         painter.restore()
 
+    def _draw_circular_loading_spinner(self, painter: QPainter, center_pt: QPointF) -> None:
+        """
+        Draw a circular neon progress ring + rotating glow sweep + large numbered
+        percentage indicator (`0% – 100%`) inside the Center Well.
+        """
+        painter.save()
+
+        spin_radius = self.INNER_WELL_RADIUS - 9.0
+        spin_rect = QRectF(
+            self.CENTER - spin_radius,
+            self.CENTER - spin_radius,
+            spin_radius * 2.0,
+            spin_radius * 2.0,
+        )
+
+        # 1. Background track ring
+        track_pen = QPen(
+            QColor(51, 65, 85, 130), 6.0, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap
+        )
+        painter.setPen(track_pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawEllipse(center_pt, spin_radius, spin_radius)
+
+        # 2. Proportional percentage progress arc (starts at top 90° and fills clockwise)
+        pct = max(1, min(100, self._conversion_progress_pct))
+        span_deg = -(pct / 100.0) * 360.0
+
+        bloom_pen = QPen(
+            QColor(168, 85, 247, 115),
+            11.0,
+            Qt.PenStyle.SolidLine,
+            Qt.PenCapStyle.RoundCap,
+        )
+        painter.setPen(bloom_pen)
+        painter.drawArc(spin_rect, int(90 * 16), int(span_deg * 16))
+
+        prog_grad = QLinearGradient(spin_rect.topLeft(), spin_rect.bottomRight())
+        prog_grad.setColorAt(0.0, QColor(56, 189, 248, 255))
+        prog_grad.setColorAt(0.5, QColor(129, 140, 248, 255))
+        prog_grad.setColorAt(1.0, QColor(192, 132, 252, 255))
+
+        prog_pen = QPen(prog_grad, 5.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
+        painter.setPen(prog_pen)
+        painter.drawArc(spin_rect, int(90 * 16), int(span_deg * 16))
+
+        # 3. Rotating active neon comet highlight
+        comet_pen = QPen(
+            QColor(255, 255, 255, 190), 3.0, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap
+        )
+        painter.setPen(comet_pen)
+        painter.drawArc(spin_rect, int(self._spinner_angle * 16), int(48 * 16))
+
+        # 4. Large Numbered Percentage Readout in the Center ("68%")
+        pct_font = QFont("Segoe UI", 16)
+        pct_font.setBold(True)
+        painter.setFont(pct_font)
+        painter.setPen(QColor(255, 255, 255, 252))
+        painter.drawText(
+            QRectF(self.CENTER - 64, self.CENTER - 30, 128, 28),
+            Qt.AlignmentFlag.AlignCenter,
+            f"{self._conversion_progress_pct}%",
+        )
+
+        # 5. Conversion Mode & Subtitle Below Percentage
+        f1 = QFont("Segoe UI", 8)
+        f1.setBold(True)
+        painter.setFont(f1)
+        painter.setPen(QColor(56, 189, 248, 250))
+        painter.drawText(
+            QRectF(self.CENTER - 68, self.CENTER - 1, 136, 16),
+            Qt.AlignmentFlag.AlignCenter,
+            self._loading_title or "CONVERTING...",
+        )
+
+        f2 = QFont("Segoe UI", 7)
+        painter.setFont(f2)
+        painter.setPen(QColor(203, 213, 225, 220))
+        painter.drawText(
+            QRectF(self.CENTER - 68, self.CENTER + 14, 136, 14),
+            Qt.AlignmentFlag.AlignCenter,
+            self._loading_subtitle or "Preserving 1:1 layout",
+        )
+
+        painter.restore()
+
     def _draw_center_overlay(self, painter: QPainter, center_pt: QPointF) -> None:
         painter.save()
+
+        # If actively converting in background, show the Numbered % Circular Loading Indicator!
+        if self.is_converting:
+            self._draw_circular_loading_spinner(painter, center_pt)
+            painter.restore()
+            return
 
         # 1. Subtle top close button inside the center well
         close_rect = self._close_button_rect()
@@ -1656,7 +3107,7 @@ class RadialImageConverter(QWidget):
             painter.drawText(
                 QRectF(self.CENTER - 76, self.CENTER - 3, 152, 15),
                 Qt.AlignmentFlag.AlignCenter,
-                "Drop here to adjust Q/Scale",
+                "Drop here to stage file",
             )
             painter.setPen(QColor(148, 163, 184, 180))
             painter.drawText(
@@ -1717,7 +3168,7 @@ class RadialImageConverter(QWidget):
             title = (
                 f"📌 {self._staged_files[0].name[:15]}"
                 if count == 1
-                else f"📌 {count} IMAGES READY"
+                else f"📌 {count} FILES READY"
             )
             f1 = QFont("Segoe UI", 8)
             f1.setBold(True)
@@ -1752,6 +3203,8 @@ class RadialImageConverter(QWidget):
     # Mouse & Context Menu Interaction
     # ------------------------------------------------------------------
     def mousePressEvent(self, event: QMouseEvent) -> None:
+        if self.is_converting:
+            return
         self._reset_inactivity_timer()
         pos = event.position()
         if event.button() == Qt.MouseButton.LeftButton:
@@ -1770,7 +3223,6 @@ class RadialImageConverter(QWidget):
                 self._update_quality_from_pos(pos)
                 return
 
-            # Option 1: If files are staged in the Center Well, clicking a format tile converts them!
             clicked_tile = self._hit_test_tile(pos, snap_nearest=False)
             if clicked_tile is not None and self.has_staged_files:
                 files_to_convert = list(self._staged_files)
@@ -1784,6 +3236,8 @@ class RadialImageConverter(QWidget):
             event.accept()
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        if self.is_converting:
+            return
         pos = event.position()
 
         if self.is_adjusting_quality and (event.buttons() & Qt.MouseButton.LeftButton):
@@ -1830,6 +3284,8 @@ class RadialImageConverter(QWidget):
         self.update()
 
     def wheelEvent(self, event: QWheelEvent) -> None:
+        if self.is_converting:
+            return
         self._reset_inactivity_timer()
         delta = event.angleDelta().y()
         if delta != 0:
@@ -1838,6 +3294,8 @@ class RadialImageConverter(QWidget):
             self.update()
 
     def contextMenuEvent(self, event) -> None:
+        if self.is_converting:
+            return
         self._reset_inactivity_timer()
         menu = QMenu(self)
         menu.setStyleSheet(
@@ -1936,6 +3394,10 @@ class RadialImageConverter(QWidget):
             self.drag_target_idx = self._hit_test_tile(pos, snap_nearest=True)
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
+        if self.is_converting:
+            event.ignore()
+            return
+
         if not event.mimeData().hasUrls():
             event.ignore()
             self._drag_rejected_unsupported = True
@@ -1943,8 +3405,7 @@ class RadialImageConverter(QWidget):
                 self._abort_invisible_drag_probe()
             return
 
-        # 3. Only appear if the dragged selection consists of supported image formats!
-        files = self._collect_image_files(event.mimeData().urls())
+        files = self._collect_supported_files(event.mimeData().urls())
         if not files:
             event.ignore()
             self._drag_rejected_unsupported = True
@@ -1957,7 +3418,6 @@ class RadialImageConverter(QWidget):
         self._auto_hide_timer.stop()
         self._reset_inactivity_timer()
 
-        # If this drag was caught by our imperceptible probe, reveal the wheel in the center!
         if not self._wheel_shown or self._is_probing_drag:
             self._set_wheel_visible(True, force=True)
 
@@ -1973,11 +3433,11 @@ class RadialImageConverter(QWidget):
         self.update()
 
     def dragMoveEvent(self, event: QDragMoveEvent) -> None:
-        if not event.mimeData().hasUrls():
+        if self.is_converting or not event.mimeData().hasUrls():
             event.ignore()
             return
 
-        files = self._collect_image_files(event.mimeData().urls())
+        files = self._collect_supported_files(event.mimeData().urls())
         if not files:
             event.ignore()
             return
@@ -2002,6 +3462,10 @@ class RadialImageConverter(QWidget):
         self.update()
 
     def dropEvent(self, event: QDropEvent) -> None:
+        if self.is_converting:
+            event.ignore()
+            return
+
         self.is_dragging_files = False
         pos = event.position()
         dropped_in_center = self._is_inside_center_well(pos)
@@ -2014,7 +3478,7 @@ class RadialImageConverter(QWidget):
             self.update()
             return
 
-        files = self._collect_image_files(event.mimeData().urls())
+        files = self._collect_supported_files(event.mimeData().urls())
         if not files:
             event.ignore()
             if not self._manual_pin_visible:
@@ -2025,7 +3489,6 @@ class RadialImageConverter(QWidget):
         self._auto_hide_timer.stop()
         self._reset_inactivity_timer()
 
-        # Option 1: Dropped inside the Center Well -> Stage files & keep wheel open to tweak Quality/Scale!
         if dropped_in_center:
             self._staged_files = files
             self._status_text = ""
@@ -2042,72 +3505,76 @@ class RadialImageConverter(QWidget):
         self._run_conversion_batch(files, target_idx)
 
     def _run_conversion_batch(self, files: list[Path], target_idx: int) -> None:
+        if self.is_converting:
+            return
         self._reset_inactivity_timer()
-        label, target_ext, pil_format, _ = RADIAL_FORMATS[target_idx]
+        label, _, pil_format, _ = RADIAL_FORMATS[target_idx]
 
-        # Check Pro license gate if ENFORCE_PRO_LICENSE is enabled
         if not self.is_pro:
-            has_heic = any(f.suffix.lower() in {".heic", ".heif"} for f in files)
-            if label in PRO_ONLY_FORMATS or has_heic:
+            has_heic_or_doc = any(
+                f.suffix.lower() in {".heic", ".heif", ".pdf", ".docx", ".doc"}
+                for f in files
+            )
+            if label in PRO_ONLY_FORMATS or has_heic_or_doc:
                 self.open_license_dialog()
                 if not self.is_pro:
                     self._show_temporary_status(
                         "🔒 PRO REQUIRED",
-                        "Unlock Pro for PDF/HEIC/ICO",
+                        "Unlock Pro for PDF/WORD/HEIC",
                         1500,
                         hide_wheel_on_finish=True,
                     )
                     return
 
+        exts = {f.suffix.lower() for f in files}
+        if exts.issubset(PDF_INPUT_EXTS) and pil_format in {"DOCX", "PDF"}:
+            self._loading_title = "PDF → WORD"
+            self._loading_subtitle = "Preserving 1:1 layout"
+        elif exts.issubset(WORD_INPUT_EXTS):
+            self._loading_title = "WORD → PDF"
+            self._loading_subtitle = "Rendering A4 PDF"
+        else:
+            self._loading_title = f"CONVERTING → {label}"
+            self._loading_subtitle = f"{len(files)} file(s)"
+
+        self.is_converting = True
         self.active_flash_idx = target_idx
-        self._flash_timer.start(800)
+        self._spinner_angle = 0
+        self._spinner_tick_count = 0
+        self._conversion_progress_pct = 5
+        self._target_progress_pct = 10
+        self._spinner_timer.start()
+        self.update()
 
-        # Measure original file sizes before conversion
-        orig_bytes = sum(f.stat().st_size for f in files if f.exists())
+        self._worker = ConversionWorkerThread(
+            files=list(files),
+            target_idx=target_idx,
+            quality=self.quality,
+            scale_preset=self.current_scale_preset,
+            replace_original=self.replace_original,
+            merge_pdf_enabled=self.merge_pdf_enabled,
+            parent=self,
+        )
+        self._worker.progress_updated.connect(self._on_worker_progress)
+        self._worker.batch_finished.connect(self._on_worker_batch_finished)
+        self._worker.start()
 
-        # Special Case: Merge 2+ images (including .HEIC) dropped onto PDF into one multi-page A4 PDF
-        if pil_format == "PDF" and len(files) >= 2 and self.merge_pdf_enabled:
-            try:
-                merged_out = convert_images_to_merged_pdf(
-                    source_paths=files,
-                    quality=self.quality,
-                    scale_preset=self.current_scale_preset,
-                    replace_original=self.replace_original,
-                )
-                new_bytes = merged_out.stat().st_size if merged_out.exists() else 0
-                self._copy_files_to_clipboard([merged_out])
-                delta_str = format_size_delta(orig_bytes, new_bytes)
-                self._show_temporary_status(
-                    f"✓ {len(files)} A4 PAGES",
-                    delta_str or merged_out.name[:22],
-                    900,
-                    hide_wheel_on_finish=True,
-                )
-            except Exception as exc:  # noqa: BLE001
-                self._show_temporary_status(
-                    "❌ PDF FAILED",
-                    str(exc)[:22],
-                    1500,
-                    hide_wheel_on_finish=True,
-                )
-            return
+    def _on_worker_batch_finished(
+        self,
+        converted_paths: list[Path],
+        errors: list[str],
+        label: str,
+        orig_bytes: int,
+        target_idx: int,
+    ) -> None:
+        self._conversion_progress_pct = 100
+        self._target_progress_pct = 100
+        self.is_converting = False
+        self._spinner_timer.stop()
+        self._reset_inactivity_timer()
 
-        converted_paths: list[Path] = []
-        errors: list[str] = []
-
-        for file_path in files:
-            try:
-                out_path = convert_single_image(
-                    source_path=file_path,
-                    target_ext=target_ext,
-                    pil_format=pil_format,
-                    quality=self.quality,
-                    scale_preset=self.current_scale_preset,
-                    replace_original=self.replace_original,
-                )
-                converted_paths.append(out_path)
-            except Exception as exc:  # noqa: BLE001
-                errors.append(f"{file_path.name}: {exc}")
+        self.active_flash_idx = target_idx
+        self._flash_timer.start(850)
 
         if converted_paths and not errors:
             new_bytes = sum(p.stat().st_size for p in converted_paths if p.exists())
@@ -2116,38 +3583,39 @@ class RadialImageConverter(QWidget):
 
             if len(converted_paths) == 1:
                 self._show_temporary_status(
-                    f"✓ {label} SAVED",
+                    f"✓ {label} SAVED (100%)",
                     delta_str or converted_paths[0].name[:22],
-                    900,
+                    950,
                     hide_wheel_on_finish=True,
                 )
             else:
                 self._show_temporary_status(
-                    f"✓ {len(converted_paths)} → {label}",
+                    f"✓ {len(converted_paths)} → {label} (100%)",
                     delta_str or "Saved & copied",
-                    900,
+                    950,
                     hide_wheel_on_finish=True,
                 )
         elif converted_paths and errors:
+            self._copy_files_to_clipboard(converted_paths)
             self._show_temporary_status(
                 f"⚠️ {len(converted_paths)} OK / {len(errors)} ERR",
                 errors[0][:20],
-                1500,
+                1600,
                 hide_wheel_on_finish=True,
             )
         else:
             self._show_temporary_status(
                 "❌ FAILED",
-                errors[0][:22],
-                1500,
+                (errors[0] if errors else "Conversion error")[:22],
+                1600,
                 hide_wheel_on_finish=True,
             )
 
-    def _collect_image_files(self, urls: Iterable[QUrl]) -> list[Path]:
+    def _collect_supported_files(self, urls: Iterable[QUrl]) -> list[Path]:
         """
-        Return local image `Path`s only if ALL dragged items have a supported image
-        extension (`SUPPORTED_INPUT_EXTS`). If any dragged item is an unsupported
-        file format or a folder, return `[]` so the tool remains hidden.
+        Return local `Path`s only if ALL dragged items have a supported extension
+        (`SUPPORTED_INPUT_EXTS`: images, `.pdf`, `.docx`, `.doc`). If any dragged
+        item is an unsupported format or a folder, return `[]` so the UI stays hidden.
         """
         collected: list[Path] = []
         for url in urls:

@@ -1,18 +1,22 @@
 #!/usr/bin/env python3
 """
-FloatConvert — Smart Drag-Activated Radial Neon Image Converter
-===============================================================
-A frameless, always-on-top circular desktop UI with glowing neon accents
-and zero-latency stealth activation.
+FloatConvert — Smart Drag-Activated Radial Neon Image Converter (Commercial Edition)
+====================================================================================
+A frameless, always-on-top circular desktop UI with glowing neon accents,
+zero-latency stealth activation, and built-in Gumroad / Offline License Key
+verification for commercial distribution.
 
 How It Works:
-- Press Ctrl + Alt + C: Activates (Arms) Smart Drag Mode silently in the
-  background.
-- Press Ctrl + Alt + D: Disables Smart Drag Mode completely so dragging
-  never triggers the UI until you press Ctrl + Alt + C again.
-- Drag Any Image: Hovering or clicking to select an image will NOT trigger
-  the UI. When you hold and drag an image in File Explorer or Desktop, the
-  circular neon UI appears in the CENTER of your screen (0ms).
+- Inactive by Default on Startup: When you boot your laptop or launch the app,
+  FloatConvert starts silently in Inactive Mode so it never pops up unexpectedly.
+- Press Ctrl + Alt + C: Manually activates (Arms) Smart Drag Mode and starts a
+  5-minute inactivity timer (resets on every use; automatically deactivates
+  after 5 minutes of inactivity).
+- Press Ctrl + Alt + D: Manually disables Smart Drag Mode at any time.
+- Supported Formats Only: When Armed, the circular neon UI only appears when you
+  drag a supported image format (.jpg, .png, .webp, .heic, .heif, .bmp, .gif,
+  .tiff, .ico, .avif, etc.). Dragging unsupported files (.pdf, .docx, .mp4,
+  .zip, .txt, folders) or empty selection boxes keeps the UI completely hidden.
 - Two Ways to Adjust Quality & Scale:
   1. Option 1 (Center Well "Hold & Tweak"): Drop your image inside the Center
      Circle instead of on a format button. The wheel stays open with your
@@ -21,6 +25,12 @@ How It Works:
   2. Option 3 (Mid-Drag Keys): While dragging an image over the wheel, tap
      SPACE to cycle Scale (Original -> 1080p -> 50%) or UP/DOWN ARROW keys
      to change Quality (5%–100%) on the fly before dropping on a format tile!
+
+Commercial Licensing Configuration:
+- Set `ENFORCE_PRO_LICENSE = True` before building your public customer
+  installer to lock Pro features (PDF Merge, HEIC, Scaling, ICO/GIF) behind
+  Gumroad license verification.
+- Master Offline Test Key: `FLOAT-PRO-2026`
 
 Requirements:
     pip install PyQt6 Pillow pillow-heif
@@ -31,9 +41,12 @@ Usage:
 
 from __future__ import annotations
 
+import json
 import math
 import sys
 import time
+import urllib.parse
+import urllib.request
 from pathlib import Path
 from typing import Iterable
 
@@ -77,9 +90,44 @@ from PyQt6.QtGui import (
     QWheelEvent,
 )
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
-from PyQt6.QtWidgets import QApplication, QMenu, QSystemTrayIcon, QWidget
+from PyQt6.QtWidgets import (
+    QApplication,
+    QDialog,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMenu,
+    QPushButton,
+    QSystemTrayIcon,
+    QVBoxLayout,
+    QWidget,
+)
 
 SINGLE_INSTANCE_KEY = "FloatConvert_Radial_SingleInstance_Server"
+
+# ==============================================================================
+# COMMERCIAL LICENSING SETTINGS (Gumroad + Offline Master Key)
+# ==============================================================================
+# Set to True when compiling the public version for customers on Gumroad.
+# Keep False on your own machine if you want all Pro features unlocked by default.
+ENFORCE_PRO_LICENSE = False
+
+# Your Gumroad product permalink or Product ID (from your Gumroad product settings)
+GUMROAD_PRODUCT_PERMALINK = "floatconvert"
+
+# Master offline key for testing or VIP giveaways
+MASTER_OFFLINE_KEYS = {"FLOAT-PRO-2026", "ZEESHAN-PRO-VIP"}
+
+LICENSE_FILE_PATH = Path.home() / ".floatconvert_license.json"
+PRO_ONLY_FORMATS = {"ICO", "GIF", "PDF"}
+
+# Auto-deactivate Smart Drag Mode after 5 minutes (300,000 ms) of inactivity
+INACTIVITY_TIMEOUT_MS = 5 * 60 * 1000
+
+# ISO A4 physical dimensions in millimeters (210mm x 297mm) and uniform margin (15mm)
+A4_SHORT_MM = 210.0
+A4_LONG_MM = 297.0
+A4_MARGIN_MM = 15.0
 
 # Supported input extensions (including iPhone .heic / .heif)
 SUPPORTED_INPUT_EXTS = {
@@ -120,6 +168,178 @@ EXPLORER_WINDOW_CLASSES = {
     "WorkerW",
     "#32770",
 }
+
+
+# ----------------------------------------------------------------------
+# License Verification & Persistence Helpers
+# ----------------------------------------------------------------------
+def load_saved_license() -> bool:
+    """Return True if Pro Mode is unlocked locally or ENFORCE_PRO_LICENSE is False."""
+    if not ENFORCE_PRO_LICENSE:
+        return True
+    try:
+        if LICENSE_FILE_PATH.exists():
+            data = json.loads(LICENSE_FILE_PATH.read_text(encoding="utf-8"))
+            return bool(data.get("is_pro", False) and data.get("license_key"))
+    except Exception:  # noqa: BLE001
+        pass
+    return False
+
+
+def verify_and_save_license_key(license_key: str) -> tuple[bool, str]:
+    """
+    Verify `license_key` against master offline keys or Gumroad's License API.
+    Saves activation state to `~/.floatconvert_license.json`.
+    """
+    cleaned = license_key.strip()
+    if not cleaned:
+        return False, "Please enter a license key."
+
+    if cleaned.upper() in MASTER_OFFLINE_KEYS:
+        _save_license_file(cleaned.upper(), "offline_master")
+        return True, "Pro License activated! All features unlocked."
+
+    # Verify via Gumroad API (/v2/licenses/verify) using standard library urllib
+    try:
+        payload = urllib.parse.urlencode(
+            {
+                "product_permalink": GUMROAD_PRODUCT_PERMALINK,
+                "license_key": cleaned,
+                "increment_uses_count": "true",
+            }
+        ).encode("utf-8")
+        req = urllib.request.Request(
+            "https://api.gumroad.com/v2/licenses/verify",
+            data=payload,
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+            if body.get("success") and not body.get("purchase", {}).get("refunded", False):
+                _save_license_file(cleaned, "gumroad")
+                return True, "Gumroad Pro License verified & activated!"
+            return False, body.get("message", "Invalid or refunded license key.")
+    except Exception as exc:  # noqa: BLE001
+        return False, f"Verification error: {exc}"
+
+
+def _save_license_file(key: str, source: str) -> None:
+    try:
+        LICENSE_FILE_PATH.write_text(
+            json.dumps({"is_pro": True, "license_key": key, "source": source}, indent=2),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+
+
+class LicenseActivationDialog(QDialog):
+    """Dark neon dialog for activating a FloatConvert Pro license key."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Activate FloatConvert Pro")
+        self.setFixedSize(380, 210)
+        self.setWindowFlags(
+            Qt.WindowType.Dialog
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.WindowCloseButtonHint
+        )
+        self.setStyleSheet(
+            """
+            QDialog {
+                background-color: #0F172A;
+                color: #F8FAFC;
+            }
+            QLabel#Header {
+                color: #F8FAFC;
+                font-size: 14px;
+                font-weight: 700;
+            }
+            QLabel#Sub {
+                color: #94A3B8;
+                font-size: 11px;
+            }
+            QLineEdit {
+                background-color: #1E293B;
+                color: #F8FAFC;
+                border: 1px solid #475569;
+                border-radius: 7px;
+                padding: 8px 10px;
+                font-size: 12px;
+            }
+            QLineEdit:focus {
+                border: 1px solid #A855F7;
+            }
+            QPushButton#ActivateBtn {
+                background-color: #6D28D9;
+                color: #FFFFFF;
+                border: 1px solid #A855F7;
+                border-radius: 7px;
+                padding: 7px 16px;
+                font-size: 12px;
+                font-weight: 700;
+            }
+            QPushButton#ActivateBtn:hover {
+                background-color: #7C3AED;
+            }
+            QPushButton#CancelBtn {
+                background-color: #1E293B;
+                color: #CBD5E1;
+                border: 1px solid #334155;
+                border-radius: 7px;
+                padding: 7px 14px;
+                font-size: 12px;
+            }
+            """
+        )
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 18, 20, 18)
+        layout.setSpacing(10)
+
+        header = QLabel("⚡ Unlock FloatConvert Pro")
+        header.setObjectName("Header")
+        layout.addWidget(header)
+
+        sub = QLabel(
+            "Enter your Gumroad license key to unlock multi-page PDF merging, "
+            "iPhone .HEIC support, and 1080p/50% scaling."
+        )
+        sub.setObjectName("Sub")
+        sub.setWordWrap(True)
+        layout.addWidget(sub)
+
+        self.key_input = QLineEdit()
+        self.key_input.setPlaceholderText("XXXX-XXXX-XXXX-XXXX (or FLOAT-PRO-2026)")
+        layout.addWidget(self.key_input)
+
+        self.feedback_label = QLabel("")
+        self.feedback_label.setObjectName("Sub")
+        layout.addWidget(self.feedback_label)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.setObjectName("CancelBtn")
+        cancel_btn.clicked.connect(self.reject)
+
+        activate_btn = QPushButton("Activate Pro")
+        activate_btn.setObjectName("ActivateBtn")
+        activate_btn.clicked.connect(self._on_activate_clicked)
+
+        btn_row.addWidget(cancel_btn)
+        btn_row.addWidget(activate_btn)
+        layout.addLayout(btn_row)
+
+    def _on_activate_clicked(self) -> None:
+        ok, msg = verify_and_save_license_key(self.key_input.text())
+        if ok:
+            self.accept()
+        else:
+            self.feedback_label.setStyleSheet("color: #F87171; font-size: 11px;")
+            self.feedback_label.setText(msg)
 
 
 class GlobalHotkeyThread(QThread):
@@ -164,8 +384,8 @@ class GlobalHotkeyThread(QThread):
             pass
 
 
-def create_neon_tray_icon(armed: bool = True) -> QIcon:
-    """Generate a crisp circular icon for the System Tray (Neon when Armed, Dim when Disabled)."""
+def create_neon_tray_icon(armed: bool = False) -> QIcon:
+    """Generate a crisp circular icon for the System Tray (Neon when Armed, Dim when Inactive)."""
     pix = QPixmap(64, 64)
     pix.fill(Qt.GlobalColor.transparent)
     painter = QPainter(pix)
@@ -242,6 +462,59 @@ def flatten_to_rgb(img: Image.Image) -> Image.Image:
     return img
 
 
+def get_a4_pdf_dpi(scale_preset: str) -> float:
+    """Return the target print DPI for ISO A4 PDF generation based on `scale_preset`."""
+    if scale_preset == "1080p":
+        return 200.0
+    if scale_preset == "50%":
+        return 150.0
+    return 300.0
+
+
+def compose_a4_pdf_page(img: Image.Image, scale_preset: str = "Original") -> tuple[Image.Image, float]:
+    """
+    Place `img` onto a clean, uniform ISO A4 page (210mm x 297mm):
+    - Automatically selects Portrait (height >= width) or Landscape (width > height)
+      orientation to match the image.
+    - Maintains uniform 15mm margins on all four sides.
+    - Preserves exact image aspect ratio (no stretching, no cropping, no overflow).
+    - Centers the image cleanly on a crisp white RGB A4 canvas.
+    Returns `(a4_page_image, dpi)`.
+    """
+    img = ImageOps.exif_transpose(img)
+    rgb = flatten_to_rgb(img)
+
+    dpi = get_a4_pdf_dpi(scale_preset)
+    short_px = int(round((A4_SHORT_MM / 25.4) * dpi))
+    long_px = int(round((A4_LONG_MM / 25.4) * dpi))
+    margin_px = int(round((A4_MARGIN_MM / 25.4) * dpi))
+
+    # Automatically choose Landscape if image is wider than tall, else Portrait
+    if rgb.width > rgb.height:
+        page_w, page_h = long_px, short_px
+    else:
+        page_w, page_h = short_px, long_px
+
+    avail_w = max(1, page_w - 2 * margin_px)
+    avail_h = max(1, page_h - 2 * margin_px)
+
+    # Fit inside the usable margin box while strictly preserving aspect ratio
+    fit_scale = min(avail_w / max(1, rgb.width), avail_h / max(1, rgb.height))
+    target_w = max(1, min(avail_w, int(round(rgb.width * fit_scale))))
+    target_h = max(1, min(avail_h, int(round(rgb.height * fit_scale))))
+
+    if (target_w, target_h) != rgb.size:
+        fitted = rgb.resize((target_w, target_h), Image.Resampling.LANCZOS)
+    else:
+        fitted = rgb
+
+    page = Image.new("RGB", (page_w, page_h), (255, 255, 255))
+    paste_x = margin_px + (avail_w - target_w) // 2
+    paste_y = margin_px + (avail_h - target_h) // 2
+    page.paste(fitted, (paste_x, paste_y))
+    return page, dpi
+
+
 def _unique_output_path(parent_dir: Path, stem: str, target_ext: str) -> Path:
     candidate = parent_dir / f"{stem}{target_ext}"
     counter = 1
@@ -259,11 +532,22 @@ def convert_pil_image_to_path(
     scale_preset: str = "Original",
 ) -> Path:
     """Save an in-memory PIL Image (including decoded .HEIC) to `output_path`."""
+    if pil_format == "PDF":
+        a4_page, dpi = compose_a4_pdf_page(img, scale_preset=scale_preset)
+        a4_page.save(
+            output_path,
+            format="PDF",
+            resolution=dpi,
+            quality=max(5, min(100, quality)),
+        )
+        a4_page.close()
+        return output_path
+
     img = ImageOps.exif_transpose(img)
     img = apply_resolution_preset(img, scale_preset)
 
     save_kwargs: dict = {}
-    if pil_format in {"JPEG", "BMP", "PDF"}:
+    if pil_format in {"JPEG", "BMP"}:
         img = flatten_to_rgb(img)
     elif pil_format == "ICO":
         img = img.convert("RGBA")
@@ -336,31 +620,38 @@ def convert_single_image(
 
 def convert_images_to_merged_pdf(
     source_paths: list[Path],
+    quality: int = 85,
     scale_preset: str = "Original",
     replace_original: bool = False,
 ) -> Path:
-    """Combine 2 or more images (including .HEIC) into a single multi-page PDF."""
+    """
+    Combine 2 or more images (including .HEIC) into a single multi-page ISO A4 PDF.
+    Each image is placed on its own A4 page (auto Portrait/Landscape) with uniform
+    margins, centered alignment, and preserved aspect ratio.
+    """
     first = source_paths[0]
     parent_dir = first.parent
     out_path = _unique_output_path(parent_dir, f"{first.stem}_merged", ".pdf")
 
-    rgb_pages: list[Image.Image] = []
+    a4_pages: list[Image.Image] = []
+    target_dpi = get_a4_pdf_dpi(scale_preset)
     try:
         for src in source_paths:
             with Image.open(src) as img:
-                page = ImageOps.exif_transpose(img)
-                page = apply_resolution_preset(page, scale_preset)
-                page = flatten_to_rgb(page).copy()
-                rgb_pages.append(page)
+                page, dpi = compose_a4_pdf_page(img, scale_preset=scale_preset)
+                target_dpi = dpi
+                a4_pages.append(page)
 
-        rgb_pages[0].save(
+        a4_pages[0].save(
             out_path,
             format="PDF",
             save_all=True,
-            append_images=rgb_pages[1:],
+            append_images=a4_pages[1:],
+            resolution=target_dpi,
+            quality=max(5, min(100, quality)),
         )
     finally:
-        for page in rgb_pages:
+        for page in a4_pages:
             page.close()
 
     if replace_original:
@@ -376,13 +667,16 @@ def convert_images_to_merged_pdf(
 
 class RadialImageConverter(QWidget):
     """
-    Circular frameless floating desktop UI that stays pre-rendered in GPU memory
-    (0.0 opacity + click-through) when Armed, pops up in the CENTER of the screen
-    in 0ms when you hold and drag an image in File Explorer/Desktop, and supports:
-    - Option 1: Drop in the Center Well to "Hold & Tweak" Quality/Scale with mouse,
-      then click any format tile to convert and auto-close.
-    - Option 3: Mid-drag keyboard shortcuts (SPACE cycles Scale, UP/DOWN arrows
-      adjust Quality while dragging).
+    Circular frameless floating desktop UI that:
+    1. Starts INACTIVE by default when you open your laptop—never triggers until
+       you manually enable it (Ctrl + Alt + C) and automatically deactivates
+       after 5 minutes of inactivity.
+    2. Uses an imperceptible (alpha=2/255) OLE drop-target surface under the cursor
+       when Armed so Windows `DoDragDrop` delivers `dragEnterEvent` immediately and
+       the UI ONLY appears when you drag a supported image file format (staying
+       completely hidden for unsupported files or empty selection drags).
+    3. Supports Option 1 (Center Well "Hold & Tweak") and Option 3 (Mid-Drag
+       SPACE / UP / DOWN shortcuts).
     """
 
     WINDOW_SIZE = 460
@@ -400,9 +694,11 @@ class RadialImageConverter(QWidget):
     # Drag threshold so normal single-clicks / selecting an image never triggers the UI
     DRAG_MIN_DISTANCE_PX = 45.0
     DRAG_MIN_HOLD_SECONDS = 0.18
+    PROBE_MAX_MOVE_TICKS = 10
 
     def __init__(self) -> None:
         super().__init__()
+        self.is_pro: bool = load_saved_license()
         self.quality: int = 85
         self.scale_idx: int = 0  # 0="Original", 1="1080p", 2="50%"
         self.replace_original: bool = False
@@ -410,17 +706,23 @@ class RadialImageConverter(QWidget):
         self.merge_pdf_enabled: bool = True
         self.is_pinned: bool = True
 
-        # Smart Drag-Sense & Staged (Hold & Tweak) State
-        self.is_armed: bool = True
+        # 1. Inactive by default on laptop startup! Only activates on manual enable (Ctrl+Alt+C)
+        self.is_armed: bool = False
         self._wheel_shown: bool = False
         self._manual_pin_visible: bool = False
         self._staged_files: list[Path] = []
         self._is_dragging_over_center: bool = False
         self._conversion_just_finished: bool = False
+
+        # Mouse drag & imperceptible OLE format probe state
         self._mouse_was_down: bool = False
         self._mouse_down_pos: QPoint = QPoint(0, 0)
         self._mouse_down_time: float = 0.0
         self._drag_origin_is_explorer: bool = False
+        self._is_probing_drag: bool = False
+        self._probe_move_ticks: int = 0
+        self._last_probe_pos: QPoint = QPoint(0, 0)
+        self._drag_rejected_unsupported: bool = False
 
         # Edge-triggered key state tracking for Option 3 mid-drag shortcuts
         self._key_was_down: dict[int, bool] = {}
@@ -449,7 +751,12 @@ class RadialImageConverter(QWidget):
         self._auto_hide_timer.setSingleShot(True)
         self._auto_hide_timer.timeout.connect(self._auto_hide_after_drag)
 
-        # 30ms lightweight poller that detects file drags + mid-drag shortcut keys
+        # 5-minute auto-deactivation timer when Armed
+        self._inactivity_timer = QTimer(self)
+        self._inactivity_timer.setSingleShot(True)
+        self._inactivity_timer.timeout.connect(self._on_inactivity_timeout)
+
+        # 30ms lightweight poller (runs ONLY when manually Armed)
         self._drag_watch_timer = QTimer(self)
         self._drag_watch_timer.setInterval(30)
         self._drag_watch_timer.timeout.connect(self._poll_mouse_drag_state)
@@ -491,15 +798,28 @@ class RadialImageConverter(QWidget):
 
     def start_in_stealth_armed_mode(self) -> None:
         """
-        Keep the window surface mapped in GPU memory at 0.0 opacity with Win32
-        click-through enabled so showing it on drag takes 0.0 milliseconds.
+        Initialize the window surface in GPU memory at 0.0 opacity with Win32
+        click-through enabled, keeping Smart Drag Mode INACTIVE by default on startup
+        until the user manually presses Ctrl + Alt + C (or enables from Tray).
         """
+        self.is_armed = False
         self.setWindowOpacity(0.0)
         self.show()
         self._set_wheel_visible(False, force=True)
-        # Re-apply click-through & 0.0 opacity once Windows DWM finalizes the HWND
         QTimer.singleShot(60, lambda: self._set_wheel_visible(False, force=True))
-        self._drag_watch_timer.start()
+        self._update_tray_status()
+
+    def _reset_inactivity_timer(self) -> None:
+        """Restart the 5-minute auto-deactivation countdown whenever Armed."""
+        if self.is_armed:
+            self._inactivity_timer.start(INACTIVITY_TIMEOUT_MS)
+        else:
+            self._inactivity_timer.stop()
+
+    def _on_inactivity_timeout(self) -> None:
+        """Automatically deactivate Smart Drag Mode after 5 minutes of inactivity."""
+        if self.is_armed:
+            self.disable_armed_mode()
 
     def _set_win32_click_through(self, click_through: bool) -> None:
         """Toggle Win32 WS_EX_TRANSPARENT so an invisible 0-opacity window never blocks clicks."""
@@ -522,10 +842,37 @@ class RadialImageConverter(QWidget):
         except Exception:  # noqa: BLE001
             pass
 
+    def _start_invisible_drag_probe(self, cur_pos: QPoint) -> None:
+        """
+        Position the widget under the cursor with an imperceptible alpha=2/255 surface
+        (while SourceConstantAlpha=1.0 so Windows `WindowFromPoint` and `DoDragDrop`
+        hit-test it immediately) to let `dragEnterEvent` verify the file format
+        before ever displaying the wheel.
+        """
+        self._is_probing_drag = True
+        self._probe_move_ticks = 0
+        self._last_probe_pos = cur_pos
+        self.move(cur_pos.x() - self.width() // 2, cur_pos.y() - self.height() // 2)
+        self._set_win32_click_through(False)
+        self.setWindowOpacity(1.0)
+        self.raise_()
+        self.repaint()
+
+    def _abort_invisible_drag_probe(self) -> None:
+        """Restore click-through at 0.0 opacity when a drag is unsupported or non-file."""
+        self._is_probing_drag = False
+        self._probe_move_ticks = 0
+        if not self._wheel_shown:
+            self.setWindowOpacity(0.0)
+            self._set_win32_click_through(True)
+            self._position_center()
+            self.repaint()
+
     def _set_wheel_visible(self, visible: bool, force: bool = False) -> None:
         """Switch between 0ms invisible click-through stealth state and centered visible state."""
+        self._is_probing_drag = False
+        self._probe_move_ticks = 0
         if not force and visible == self._wheel_shown:
-            # Always enforce opacity & click-through even if state flag matches
             if not visible:
                 self.setWindowOpacity(0.0)
                 self._set_win32_click_through(True)
@@ -533,11 +880,12 @@ class RadialImageConverter(QWidget):
 
         self._wheel_shown = visible
         if visible:
+            self._reset_inactivity_timer()
             self._position_center()
             self._set_win32_click_through(False)
             self.setWindowOpacity(1.0)
             self.raise_()
-            self.update()
+            self.repaint()
         else:
             self.is_dragging_files = False
             self._is_dragging_over_center = False
@@ -546,6 +894,8 @@ class RadialImageConverter(QWidget):
             self._staged_files.clear()
             self.setWindowOpacity(0.0)
             self._set_win32_click_through(True)
+            self._position_center()
+            self.repaint()
 
     # ------------------------------------------------------------------
     # Smart Drag-Sense Detection & Option 3 Mid-Drag Keyboard Shortcuts
@@ -588,23 +938,21 @@ class RadialImageConverter(QWidget):
         return is_down and not was_down
 
     def _poll_mid_drag_shortcuts(self, user32) -> None:
-        """
-        Option 3: While the wheel is visible (during a drag or while staged),
-        let the user tap SPACE to cycle Scale (Original -> 1080p -> 50%) and
-        UP / DOWN arrows to adjust Quality (5%–100%) without releasing the mouse!
-        """
         VK_SPACE = 0x20
         VK_UP = 0x26
         VK_DOWN = 0x28
 
         if self._check_edge_key_press(user32, VK_SPACE):
+            self._reset_inactivity_timer()
             self._cycle_scale_preset()
 
         if self._check_edge_key_press(user32, VK_UP):
+            self._reset_inactivity_timer()
             self.quality = min(100, self.quality + 5)
             self.update()
 
         if self._check_edge_key_press(user32, VK_DOWN):
+            self._reset_inactivity_timer()
             self.quality = max(5, self.quality - 5)
             self.update()
 
@@ -618,7 +966,6 @@ class RadialImageConverter(QWidget):
             lbutton_down = (user32.GetAsyncKeyState(0x01) & 0x8000) != 0
             cur_pos = QCursor.pos()
 
-            # Poll Option 3 mid-drag keyboard shortcuts whenever the wheel is visible
             if self._wheel_shown:
                 self._poll_mid_drag_shortcuts(user32)
 
@@ -627,11 +974,15 @@ class RadialImageConverter(QWidget):
                 self._mouse_down_pos = cur_pos
                 self._mouse_down_time = time.monotonic()
                 self._drag_origin_is_explorer = self._is_explorer_or_desktop_under_cursor(cur_pos)
+                self._drag_rejected_unsupported = False
+                self._is_probing_drag = False
+                self._probe_move_ticks = 0
             elif lbutton_down and self._mouse_was_down:
                 if (
                     self._drag_origin_is_explorer
                     and not self._wheel_shown
                     and not self._conversion_just_finished
+                    and not self._drag_rejected_unsupported
                 ):
                     held_sec = time.monotonic() - self._mouse_down_time
                     dx = cur_pos.x() - self._mouse_down_pos.x()
@@ -640,18 +991,33 @@ class RadialImageConverter(QWidget):
                         held_sec >= self.DRAG_MIN_HOLD_SECONDS
                         and math.hypot(dx, dy) >= self.DRAG_MIN_DISTANCE_PX
                     ):
-                        self._auto_hide_timer.stop()
-                        self._set_wheel_visible(True)
+                        if not self._is_probing_drag:
+                            self._auto_hide_timer.stop()
+                            self._start_invisible_drag_probe(cur_pos)
+                        else:
+                            if cur_pos != self._last_probe_pos:
+                                self._last_probe_pos = cur_pos
+                                self._probe_move_ticks += 1
+                                self.move(
+                                    cur_pos.x() - self.width() // 2,
+                                    cur_pos.y() - self.height() // 2,
+                                )
+                            if self._probe_move_ticks > self.PROBE_MAX_MOVE_TICKS:
+                                # Moved across >10 ticks without OLE dragEnterEvent (e.g. selection box)
+                                self._drag_rejected_unsupported = True
+                                self._abort_invisible_drag_probe()
             elif not lbutton_down and self._mouse_was_down:
                 self._mouse_was_down = False
                 self._drag_origin_is_explorer = False
+                self._drag_rejected_unsupported = False
+                if self._is_probing_drag:
+                    self._abort_invisible_drag_probe()
                 if (
                     self._wheel_shown
                     and not self._manual_pin_visible
                     and not self.has_staged_files
                     and not self._conversion_just_finished
                 ):
-                    # Give a brief moment so dropEvent (on tile or center well) can fire first
                     self._auto_hide_timer.start(350)
         except Exception:  # noqa: BLE001
             pass
@@ -669,17 +1035,23 @@ class RadialImageConverter(QWidget):
     # Hotkeys (Ctrl+Alt+C to Activate, Ctrl+Alt+D to Disable) & System Tray
     # ------------------------------------------------------------------
     def _setup_tray_and_hotkey(self) -> None:
-        self.tray_icon = QSystemTrayIcon(create_neon_tray_icon(armed=True), self)
+        self.tray_icon = QSystemTrayIcon(create_neon_tray_icon(armed=False), self)
         self.tray_icon.setToolTip(
-            "FloatConvert: ARMED (Ctrl+Alt+C Activate • Ctrl+Alt+D Disable)"
+            "FloatConvert: INACTIVE (Press Ctrl+Alt+C to Activate)"
         )
 
         self.tray_menu = QMenu()
-        self.arm_tray_action = self.tray_menu.addAction("✓ Activate Smart Drag Mode (Ctrl+Alt+C)")
+        self.arm_tray_action = self.tray_menu.addAction("Activate Smart Drag Mode (Ctrl+Alt+C)")
         self.arm_tray_action.triggered.connect(self.activate_armed_mode_silently)
 
         self.disable_tray_action = self.tray_menu.addAction("Disable Smart Drag Mode (Ctrl+Alt+D)")
         self.disable_tray_action.triggered.connect(self.disable_armed_mode)
+
+        self.tray_menu.addSeparator()
+        self.license_tray_action = self.tray_menu.addAction(
+            "✓ FloatConvert Pro Activated" if self.is_pro else "🔑 Activate FloatConvert Pro..."
+        )
+        self.license_tray_action.triggered.connect(self.open_license_dialog)
 
         self.tray_menu.addSeparator()
         quit_action = self.tray_menu.addAction("Quit Completely")
@@ -694,26 +1066,45 @@ class RadialImageConverter(QWidget):
         self.hotkey_thread.disable_pressed.connect(self.disable_armed_mode)
         self.hotkey_thread.start()
 
+    def open_license_dialog(self) -> None:
+        dlg = LicenseActivationDialog(self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self.is_pro = True
+            self.license_tray_action.setText("✓ FloatConvert Pro Activated")
+            if self._wheel_shown:
+                self._show_temporary_status("⚡ PRO UNLOCKED", "All features active!", 2200)
+
     def _update_tray_status(self) -> None:
         self.tray_icon.setIcon(create_neon_tray_icon(armed=self.is_armed))
         if self.is_armed:
-            self.arm_tray_action.setText("✓ Activate Smart Drag Mode (Ctrl+Alt+C)")
+            self.arm_tray_action.setText("✓ Active — Auto-Off in 5m (Ctrl+Alt+C)")
             self.tray_icon.setToolTip(
-                "FloatConvert: ARMED (Ctrl+Alt+C Activate • Ctrl+Alt+D Disable)"
+                "FloatConvert: ACTIVE (Auto-deactivates after 5m idle • Ctrl+Alt+D Disable)"
             )
         else:
             self.arm_tray_action.setText("Activate Smart Drag Mode (Ctrl+Alt+C)")
-            self.tray_icon.setToolTip("FloatConvert: DISABLED (Press Ctrl+Alt+C to Activate)")
+            self.tray_icon.setToolTip("FloatConvert: INACTIVE (Press Ctrl+Alt+C to Activate)")
 
     def activate_armed_mode_silently(self) -> None:
+        """Manually enable Smart Drag Mode and start the 5-minute inactivity timer."""
         self.is_armed = True
         self._manual_pin_visible = False
+        self._drag_rejected_unsupported = False
+        self._is_probing_drag = False
         self._set_wheel_visible(False, force=True)
+        if not self._drag_watch_timer.isActive():
+            self._drag_watch_timer.start()
+        self._reset_inactivity_timer()
         self._update_tray_status()
 
     def disable_armed_mode(self) -> None:
+        """Deactivate Smart Drag Mode (manually or after 5 minutes of inactivity)."""
         self.is_armed = False
         self._manual_pin_visible = False
+        self._is_probing_drag = False
+        self._drag_rejected_unsupported = False
+        self._inactivity_timer.stop()
+        self._drag_watch_timer.stop()
         self._set_wheel_visible(False, force=True)
         self._update_tray_status()
 
@@ -722,6 +1113,11 @@ class RadialImageConverter(QWidget):
             self._manual_pin_visible = False
             self._set_wheel_visible(False, force=True)
         else:
+            self.is_armed = True
+            if not self._drag_watch_timer.isActive():
+                self._drag_watch_timer.start()
+            self._reset_inactivity_timer()
+            self._update_tray_status()
             self._manual_pin_visible = True
             self._set_wheel_visible(True, force=True)
             self.activateWindow()
@@ -761,11 +1157,14 @@ class RadialImageConverter(QWidget):
         self.update()
 
     def _cycle_scale_preset(self) -> None:
+        if not self.is_pro:
+            self._show_temporary_status("🔒 PRO FEATURE", "Right-click to unlock Scale", 1800)
+            return
         self.scale_idx = (self.scale_idx + 1) % len(SCALE_PRESETS)
         descriptions = {
-            "Original": "100% Native Dimensions",
-            "1080p": "Max 1920px Longest Side",
-            "50%": "Half Width & Height",
+            "Original": "100% Native / 300 DPI A4",
+            "1080p": "Max 1920px / 200 DPI A4",
+            "50%": "Half Size / 150 DPI A4",
         }
         preset = self.current_scale_preset
         if not self.has_staged_files:
@@ -876,6 +1275,18 @@ class RadialImageConverter(QWidget):
     # ------------------------------------------------------------------
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
+
+        # During the <15ms OLE format probe, paint a uniform alpha=2/255 surface:
+        # 100% imperceptible to the human eye, yet solid to Windows `WindowFromPoint` / `DoDragDrop`!
+        if self._is_probing_drag and not self._wheel_shown:
+            painter.fillRect(self.rect(), QColor(0, 0, 0, 2))
+            painter.end()
+            return
+
+        if not self._wheel_shown:
+            painter.end()
+            return
+
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
 
@@ -1055,11 +1466,13 @@ class RadialImageConverter(QWidget):
         font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 0.8)
         painter.setFont(font)
 
+        display_label = f"🔒{label}" if (not self.is_pro and label in PRO_ONLY_FORMATS) else label
+
         painter.setPen(QColor(0, 0, 0, 140))
-        painter.drawText(inner_rect.adjusted(0, 1, 0, 1), Qt.AlignmentFlag.AlignCenter, label)
+        painter.drawText(inner_rect.adjusted(0, 1, 0, 1), Qt.AlignmentFlag.AlignCenter, display_label)
 
         painter.setPen(QColor(255, 255, 255, 255 if is_highlighted else 235))
-        painter.drawText(inner_rect, Qt.AlignmentFlag.AlignCenter, label)
+        painter.drawText(inner_rect, Qt.AlignmentFlag.AlignCenter, display_label)
 
         painter.restore()
 
@@ -1339,6 +1752,7 @@ class RadialImageConverter(QWidget):
     # Mouse & Context Menu Interaction
     # ------------------------------------------------------------------
     def mousePressEvent(self, event: QMouseEvent) -> None:
+        self._reset_inactivity_timer()
         pos = event.position()
         if event.button() == Qt.MouseButton.LeftButton:
             if self._close_button_rect().contains(pos):
@@ -1373,6 +1787,7 @@ class RadialImageConverter(QWidget):
         pos = event.position()
 
         if self.is_adjusting_quality and (event.buttons() & Qt.MouseButton.LeftButton):
+            self._reset_inactivity_timer()
             self._update_quality_from_pos(pos)
             return
 
@@ -1415,6 +1830,7 @@ class RadialImageConverter(QWidget):
         self.update()
 
     def wheelEvent(self, event: QWheelEvent) -> None:
+        self._reset_inactivity_timer()
         delta = event.angleDelta().y()
         if delta != 0:
             step = 5 if delta > 0 else -5
@@ -1422,6 +1838,7 @@ class RadialImageConverter(QWidget):
             self.update()
 
     def contextMenuEvent(self, event) -> None:
+        self._reset_inactivity_timer()
         menu = QMenu(self)
         menu.setStyleSheet(
             """
@@ -1442,6 +1859,13 @@ class RadialImageConverter(QWidget):
             """
         )
 
+        pro_act = menu.addAction(
+            "✓ FloatConvert Pro Activated"
+            if self.is_pro
+            else "🔑 Activate FloatConvert Pro..."
+        )
+        menu.addSeparator()
+
         scale_menu = menu.addMenu(f"📐 Resolution Scale ({self.current_scale_preset})")
         scale_actions = {}
         for idx, preset in enumerate(SCALE_PRESETS):
@@ -1456,9 +1880,9 @@ class RadialImageConverter(QWidget):
             else "Auto-Copy Converted File to Clipboard"
         )
         merge_pdf_act = menu.addAction(
-            "✓ Merge Multiple Images into 1 PDF"
+            "✓ Merge Multiple Images into 1 A4 PDF"
             if self.merge_pdf_enabled
-            else "Merge Multiple Images into 1 PDF"
+            else "Merge Multiple Images into 1 A4 PDF"
         )
         del_action = menu.addAction(
             "✓ Delete Original After Convert"
@@ -1471,16 +1895,21 @@ class RadialImageConverter(QWidget):
         quit_action = menu.addAction("Quit Completely")
 
         chosen = menu.exec(event.globalPos())
-        if chosen in scale_actions:
-            self.scale_idx = scale_actions[chosen]
-            self.update()
+        if chosen == pro_act and not self.is_pro:
+            self.open_license_dialog()
+        elif chosen in scale_actions:
+            if not self.is_pro and scale_actions[chosen] != 0:
+                self.open_license_dialog()
+            else:
+                self.scale_idx = scale_actions[chosen]
+                self.update()
         elif chosen == copy_act:
             self.auto_copy_clipboard = not self.auto_copy_clipboard
             state = "ON" if self.auto_copy_clipboard else "OFF"
             self._show_temporary_status("📋 AUTO-COPY", f"Clipboard Copy: {state}", 1600)
         elif chosen == merge_pdf_act:
             self.merge_pdf_enabled = not self.merge_pdf_enabled
-            state = "Merged PDF" if self.merge_pdf_enabled else "Separate PDFs"
+            state = "Merged A4 PDF" if self.merge_pdf_enabled else "Separate A4 PDFs"
             self._show_temporary_status("📄 PDF MODE", state, 1600)
         elif chosen == del_action:
             self.replace_original = not self.replace_original
@@ -1507,29 +1936,64 @@ class RadialImageConverter(QWidget):
             self.drag_target_idx = self._hit_test_tile(pos, snap_nearest=True)
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
-        if event.mimeData().hasUrls():
-            self._auto_hide_timer.stop()
-            event.acceptProposedAction()
-            self.is_dragging_files = True
-            self._update_drag_hover_state(event.position())
-            self.update()
-        else:
+        if not event.mimeData().hasUrls():
             event.ignore()
+            self._drag_rejected_unsupported = True
+            if self._is_probing_drag:
+                self._abort_invisible_drag_probe()
+            return
+
+        # 3. Only appear if the dragged selection consists of supported image formats!
+        files = self._collect_image_files(event.mimeData().urls())
+        if not files:
+            event.ignore()
+            self._drag_rejected_unsupported = True
+            if self._is_probing_drag or not self._manual_pin_visible:
+                self._abort_invisible_drag_probe()
+                if self._wheel_shown and not self._manual_pin_visible and not self.has_staged_files:
+                    self._set_wheel_visible(False, force=True)
+            return
+
+        self._auto_hide_timer.stop()
+        self._reset_inactivity_timer()
+
+        # If this drag was caught by our imperceptible probe, reveal the wheel in the center!
+        if not self._wheel_shown or self._is_probing_drag:
+            self._set_wheel_visible(True, force=True)
+
+        event.acceptProposedAction()
+        local_pt = self.mapFromGlobal(QCursor.pos())
+        if self.rect().contains(local_pt):
+            self.is_dragging_files = True
+            self._update_drag_hover_state(QPointF(local_pt))
+        else:
+            self.is_dragging_files = False
+            self._is_dragging_over_center = False
+            self.drag_target_idx = None
+        self.update()
 
     def dragMoveEvent(self, event: QDragMoveEvent) -> None:
-        if event.mimeData().hasUrls():
-            self._auto_hide_timer.stop()
-            prev_center = self._is_dragging_over_center
-            prev_idx = self.drag_target_idx
-            self._update_drag_hover_state(event.position())
-            if (
-                self._is_dragging_over_center != prev_center
-                or self.drag_target_idx != prev_idx
-            ):
-                self.update()
-            event.acceptProposedAction()
-        else:
+        if not event.mimeData().hasUrls():
             event.ignore()
+            return
+
+        files = self._collect_image_files(event.mimeData().urls())
+        if not files:
+            event.ignore()
+            return
+
+        self._auto_hide_timer.stop()
+        self._reset_inactivity_timer()
+        self.is_dragging_files = True
+        prev_center = self._is_dragging_over_center
+        prev_idx = self.drag_target_idx
+        self._update_drag_hover_state(event.position())
+        if (
+            self._is_dragging_over_center != prev_center
+            or self.drag_target_idx != prev_idx
+        ):
+            self.update()
+        event.acceptProposedAction()
 
     def dragLeaveEvent(self, event) -> None:
         self.is_dragging_files = False
@@ -1550,18 +2014,16 @@ class RadialImageConverter(QWidget):
             self.update()
             return
 
-        event.acceptProposedAction()
-        self._auto_hide_timer.stop()
-
         files = self._collect_image_files(event.mimeData().urls())
         if not files:
-            self._show_temporary_status(
-                "⚠️ NO IMAGES",
-                "Unsupported file type",
-                1200,
-                hide_wheel_on_finish=True,
-            )
+            event.ignore()
+            if not self._manual_pin_visible:
+                self._set_wheel_visible(False, force=True)
             return
+
+        event.acceptProposedAction()
+        self._auto_hide_timer.stop()
+        self._reset_inactivity_timer()
 
         # Option 1: Dropped inside the Center Well -> Stage files & keep wheel open to tweak Quality/Scale!
         if dropped_in_center:
@@ -1580,18 +2042,35 @@ class RadialImageConverter(QWidget):
         self._run_conversion_batch(files, target_idx)
 
     def _run_conversion_batch(self, files: list[Path], target_idx: int) -> None:
+        self._reset_inactivity_timer()
         label, target_ext, pil_format, _ = RADIAL_FORMATS[target_idx]
+
+        # Check Pro license gate if ENFORCE_PRO_LICENSE is enabled
+        if not self.is_pro:
+            has_heic = any(f.suffix.lower() in {".heic", ".heif"} for f in files)
+            if label in PRO_ONLY_FORMATS or has_heic:
+                self.open_license_dialog()
+                if not self.is_pro:
+                    self._show_temporary_status(
+                        "🔒 PRO REQUIRED",
+                        "Unlock Pro for PDF/HEIC/ICO",
+                        1500,
+                        hide_wheel_on_finish=True,
+                    )
+                    return
+
         self.active_flash_idx = target_idx
         self._flash_timer.start(800)
 
         # Measure original file sizes before conversion
         orig_bytes = sum(f.stat().st_size for f in files if f.exists())
 
-        # Special Case: Merge 2+ images (including .HEIC) dropped onto PDF into one multi-page PDF
+        # Special Case: Merge 2+ images (including .HEIC) dropped onto PDF into one multi-page A4 PDF
         if pil_format == "PDF" and len(files) >= 2 and self.merge_pdf_enabled:
             try:
                 merged_out = convert_images_to_merged_pdf(
                     source_paths=files,
+                    quality=self.quality,
                     scale_preset=self.current_scale_preset,
                     replace_original=self.replace_original,
                 )
@@ -1599,7 +2078,7 @@ class RadialImageConverter(QWidget):
                 self._copy_files_to_clipboard([merged_out])
                 delta_str = format_size_delta(orig_bytes, new_bytes)
                 self._show_temporary_status(
-                    f"✓ {len(files)} PAGES MERGED",
+                    f"✓ {len(files)} A4 PAGES",
                     delta_str or merged_out.name[:22],
                     900,
                     hide_wheel_on_finish=True,
@@ -1665,18 +2144,21 @@ class RadialImageConverter(QWidget):
             )
 
     def _collect_image_files(self, urls: Iterable[QUrl]) -> list[Path]:
+        """
+        Return local image `Path`s only if ALL dragged items have a supported image
+        extension (`SUPPORTED_INPUT_EXTS`). If any dragged item is an unsupported
+        file format or a folder, return `[]` so the tool remains hidden.
+        """
         collected: list[Path] = []
         for url in urls:
             local_str = url.toLocalFile()
             if not local_str:
-                continue
+                return []
             path = Path(local_str)
-            if path.is_file() and path.suffix.lower() in SUPPORTED_INPUT_EXTS:
+            if path.suffix.lower() in SUPPORTED_INPUT_EXTS and not path.is_dir():
                 collected.append(path)
-            elif path.is_dir():
-                for child in sorted(path.iterdir()):
-                    if child.is_file() and child.suffix.lower() in SUPPORTED_INPUT_EXTS:
-                        collected.append(child)
+            else:
+                return []
         return collected
 
 

@@ -1,0 +1,12 @@
+# Virtual environment
+.venv/
+
+# Build files
+build/
+dist/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Spec files (optional)
